@@ -19,6 +19,7 @@
   } from '../chat-input-keys'
   import { mountOverlay } from '../stores/overlayStack'
   import { chatFocusRequest } from '../stores/npcMenuStore'
+  import { isObserver } from '../stores/observerStore'
   import {
     translationEnabled,
     translationTargetLanguage,
@@ -264,6 +265,7 @@
   }
 
   function handleGlobalKeydown(event: KeyboardEvent) {
+    if (isObserver) return
     if (event.isComposing || event.keyCode === 229) return
     // While typing, Escape is invisible to the overlay-stack handler
     // (it skips input targets), so close the menu here; no double-close.
@@ -430,81 +432,85 @@
     </div>
   </div>
 
-  <div class="chat-input" class:disconnected={!isConnected}>
-    <div class="channel-wrap">
-      {#if channelMenuOpen}
-        <div class="channel-menu" role="menu">
-          <button
-            class="channel-item"
-            role="menuitemradio"
-            aria-checked={$chatChannel === 'say'}
-            onclick={() => selectChannel('say')}
-          >
-            Say
-            {#if $chatChannel === 'say'}<span class="check">✓</span>{/if}
-          </button>
-          <button
-            class="channel-item"
-            role="menuitemradio"
-            aria-checked={$chatChannel === 'party'}
-            disabled={!inParty}
-            title={inParty ? undefined : 'Join a party to use party chat'}
-            onclick={() => selectChannel('party')}
-          >
-            Party
-            {#if $chatChannel === 'party'}<span class="check">✓</span>{/if}
-          </button>
-        </div>
-      {/if}
+  <!-- A spectator cannot talk: every send path is a no-op, and the mirror
+       relays the transcript read-only. -->
+  {#if !isObserver}
+    <div class="chat-input" class:disconnected={!isConnected}>
+      <div class="channel-wrap">
+        {#if channelMenuOpen}
+          <div class="channel-menu" role="menu">
+            <button
+              class="channel-item"
+              role="menuitemradio"
+              aria-checked={$chatChannel === 'say'}
+              onclick={() => selectChannel('say')}
+            >
+              Say
+              {#if $chatChannel === 'say'}<span class="check">✓</span>{/if}
+            </button>
+            <button
+              class="channel-item"
+              role="menuitemradio"
+              aria-checked={$chatChannel === 'party'}
+              disabled={!inParty}
+              title={inParty ? undefined : 'Join a party to use party chat'}
+              onclick={() => selectChannel('party')}
+            >
+              Party
+              {#if $chatChannel === 'party'}<span class="check">✓</span>{/if}
+            </button>
+          </div>
+        {/if}
+        <button
+          class="channel-btn"
+          aria-haspopup="menu"
+          aria-expanded={channelMenuOpen}
+          title="Choose where your messages go (/p and /s)"
+          onclick={(e) => {
+            e.stopPropagation()
+            channelMenuOpen = !channelMenuOpen
+          }}
+        >
+          {$chatChannel === 'party' ? 'Party' : 'Say'}
+          <span class="caret" aria-hidden="true">▴</span>
+        </button>
+      </div>
+      <div class="input-wrap">
+        {#if commandGhost}
+          <div class="input-ghost" aria-hidden="true">
+            <span class="ghost-typed">{messageInput}</span><span
+              class="ghost-suffix">{commandGhost}</span
+            >
+          </div>
+        {/if}
+        <input
+          type="text"
+          bind:this={chatInput}
+          bind:value={messageInput}
+          onkeydown={handleKeyDown}
+          onfocus={() => {
+            inputFocused = true
+            leaveCombatTab()
+          }}
+          onblur={() => {
+            inputFocused = false
+            restoreViewportAfterKeyboard()
+          }}
+          placeholder={$chatChannel === 'party'
+            ? 'Message your party...'
+            : 'Type a message... (/help for commands)'}
+          disabled={!isConnected}
+        />
+      </div>
       <button
-        class="channel-btn"
-        aria-haspopup="menu"
-        aria-expanded={channelMenuOpen}
-        title="Choose where your messages go (/p and /s)"
-        onclick={(e) => {
-          e.stopPropagation()
-          channelMenuOpen = !channelMenuOpen
-        }}
+        class="send-btn"
+        onclick={sendMessage}
+        disabled={!isConnected || !messageInput.trim()}
       >
-        {$chatChannel === 'party' ? 'Party' : 'Say'}
-        <span class="caret" aria-hidden="true">▴</span>
+        Send
       </button>
     </div>
-    <div class="input-wrap">
-      {#if commandGhost}
-        <div class="input-ghost" aria-hidden="true">
-          <span class="ghost-typed">{messageInput}</span><span
-            class="ghost-suffix">{commandGhost}</span
-          >
-        </div>
-      {/if}
-      <input
-        type="text"
-        bind:this={chatInput}
-        bind:value={messageInput}
-        onkeydown={handleKeyDown}
-        onfocus={() => {
-          inputFocused = true
-          leaveCombatTab()
-        }}
-        onblur={() => {
-          inputFocused = false
-          restoreViewportAfterKeyboard()
-        }}
-        placeholder={$chatChannel === 'party'
-          ? 'Message your party...'
-          : 'Type a message... (/help for commands)'}
-        disabled={!isConnected}
-      />
-    </div>
-    <button
-      class="send-btn"
-      onclick={sendMessage}
-      disabled={!isConnected || !messageInput.trim()}
-    >
-      Send
-    </button>
-  </div>
+  {/if}
 </div>
 
 <style>
