@@ -102,3 +102,19 @@ agent-client/data/cache/
 !.codex/config.toml
 !.codex/skills/
 !.codex/skills/**
+
+# The generated config's backup carries the Google installed-app secret that
+# upstream deliberately keeps out of the repo, and memory.txt is the agent's
+# own notes — neither belongs in a commit.
+/agent-client/data/config.toml.bak
+/agent-client/data/memory.txt
+
+# openmmo-client is its own repository, cloned in here.
+/openmmo-client/
+
+# openmmo-client: overlay symlinks created by openmmo-client/scripts/link.sh.
+# The real files live in openmmo-client/overlay/ so a rebase never touches them.
+/agent-client/src/mirror.rs
+/client/src/lib/stores/observerStore.ts
+/client/src/lib/managers/observedPath.ts
+/agent-client/data/user_prompt.txt
