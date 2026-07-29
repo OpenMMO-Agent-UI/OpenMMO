@@ -5,6 +5,7 @@
   import { SvelteMap } from 'svelte/reactivity'
   import PlayerModel from '../PlayerModel.svelte'
   import PlayerControl from '../PlayerControl.svelte'
+  import { isObserver } from '../../stores/observerStore'
   import type { PlayerControlEvent } from '../player-control/events'
   import type {
     ChatBubble,
@@ -442,7 +443,9 @@
   }
 </script>
 
-{#if camera && currentPlayer}
+<!-- A spectator has no input and no movement of its own: the agent's
+     position arrives over the mirror. -->
+{#if camera && currentPlayer && !isObserver}
   <PlayerControl
     bind:this={playerControl}
     {waterSurfaceAt}
