@@ -18,6 +18,12 @@ import {
   playFishingSound,
 } from '../managers/sfxManager'
 import { FISHING_CAST_SWING_DELAY_MS } from '../data/combatTiming'
+import { clearRoute, routeObserved } from '../managers/observedPath'
+import {
+  farEnoughToSnap,
+  isObserver,
+  setObservedPlayerId,
+} from '../stores/observerStore'
 import { monsterManager } from '../managers/monsterManager'
 import { housingManager } from '../managers/housingManager'
 import { bridgeManager } from '../managers/bridgeManager'
@@ -256,6 +262,16 @@ export function handleServerMessage(
         ...state,
         currentPlayer: player,
       }))
+      // A spectator has no movement FSM of its own: the agent's walk arrives
+      // as PlayerMoved, so it is interpolated like a remote player.
+      if (isObserver) {
+        setObservedPlayerId(serverPlayer.id)
+        remotePlayerManager.initPlayer(
+          serverPlayer.id,
+          serverPlayer.position,
+          serverPlayer.rotation
+        )
+      }
       // Players who logged out inside a dungeon reconnect there.
       dungeonManager.syncFromFloorLevel(
         serverPlayer.floor_level ?? 0,
@@ -351,7 +367,7 @@ export function handleServerMessage(
 
     case 'PlayerMoved': {
       const state = get(gameStore)
-      if (state.currentPlayer?.id === data.player_id) {
+      if (!isObserver && state.currentPlayer?.id === data.player_id) {
         break
       }
       const deckY = bridgeManager.findDeckYAt(
@@ -359,15 +375,35 @@ export function handleServerMessage(
         data.position.z,
         null
       )
-      remotePlayerManager.setTargetPosition(
-        data.player_id,
-        {
-          x: data.position.x,
-          y: deckY ?? data.position.y,
-          z: data.position.z,
-        },
-        data.rotation
-      )
+      const moveTo = {
+        x: data.position.x,
+        y: deckY ?? data.position.y,
+        z: data.position.z,
+      }
+      // A gap the walk cannot close is a desync, not a step — see
+      // farEnoughToSnap. Only for the watched character, whose positions are
+      // synthesized from its own outbound moves; everyone else here arrives
+      // exactly as they do in normal play.
+      const drawnAt =
+        isObserver && state.currentPlayer?.id === data.player_id
+          ? remotePlayerManager.players.get(data.player_id)?.position
+          : undefined
+      if (drawnAt && farEnoughToSnap(drawnAt, moveTo)) {
+        clearRoute(data.player_id)
+        remotePlayerManager.teleportPlayer(
+          data.player_id,
+          moveTo,
+          data.rotation
+        )
+        break
+      }
+      // A straight line to the next position is only right when nothing stands
+      // in it — see observedPath, which routes around what does and leaves a
+      // clear line alone.
+      const leg = drawnAt
+        ? routeObserved(data.player_id, drawnAt, moveTo, data.floor_level ?? 0)
+        : moveTo
+      remotePlayerManager.setTargetPosition(data.player_id, leg, data.rotation)
       const existing = state.otherPlayers.get(data.player_id)
       if (existing && existing.floorLevel !== data.floor_level) {
         updatePlayer(data.player_id, { floorLevel: data.floor_level })
@@ -400,6 +436,13 @@ export function handleServerMessage(
           data.position.z
         )
         requestCameraReset()
+        if (isObserver) {
+          remotePlayerManager.teleportPlayer(
+            data.player_id,
+            data.position,
+            data.rotation
+          )
+        }
         break
       }
       const tpDeckY = bridgeManager.findDeckYAt(
@@ -498,6 +541,20 @@ export function handleServerMessage(
       gameStore.update((state) => {
         state.otherPlayers.clear()
         remotePlayerManager.reset()
+        // That reset drops the spectator's own registration (see JoinSuccess),
+        // and the loop below re-registers everyone *except* the local id —
+        // right for a player, who drives their own movement, wrong for a
+        // spectator whose character is the one being interpolated. The server
+        // sends this baseline immediately after JoinSuccess, so without it the
+        // watched agent stands at its join position for the whole session
+        // while its PlayerMoved frames update a target nothing reads.
+        if (isObserver && state.currentPlayer) {
+          remotePlayerManager.initPlayer(
+            state.currentPlayer.id,
+            state.currentPlayer.position,
+            state.currentPlayer.rotation
+          )
+        }
         // A list, not a map: player ids are numeric and the wasm serializer
         // rejects non-string map keys (see ServerMessage::GameState).
         const serverPlayers = data.players as ServerPlayer[]
@@ -844,7 +901,11 @@ export function handleServerMessage(
 
     case 'PlayerInteractionChanged': {
       const state = get(gameStore)
-      if (state.currentPlayer?.id === data.player_id) {
+      // The local player animates its own interactions through the movement
+      // FSM, so upstream drops the echo — but a spectator has no FSM, and the
+      // watched character's pickup crouch, bench sit and forge swing arrive
+      // here or nowhere.
+      if (!isObserver && state.currentPlayer?.id === data.player_id) {
         break
       }
       const ft: string | null = data.object_type ?? null

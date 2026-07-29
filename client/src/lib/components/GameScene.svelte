@@ -55,6 +55,8 @@
   import ObjectOverlay from './map-editor/ObjectOverlay.svelte'
   import HousingEditorCursor from './map-editor/HousingEditorCursor.svelte'
   import { type PlayerState } from '../utils/movementUtils'
+  import { isObserver } from '../stores/observerStore'
+  import { nextLeg } from '../managers/observedPath'
   import {
     SUN_MAX_INTENSITY,
     computeSunLightSnapshot,
@@ -541,6 +543,33 @@
       // Update remote player interpolation
       const remoteInterpolationStart = performance.now()
       remotePlayerManager.update(deltaTime)
+      // Spectator: the watched agent is interpolated as a remote player, but
+      // the camera, terrain streaming and HUD all read currentPlayer, so its
+      // position and animation state are copied across each frame.
+      if (isObserver && currentPlayer) {
+        const observed = remotePlayerManager.players.get(currentPlayer.id)
+        if (observed) {
+          // A leg of a route around an obstacle (observedPath) ends like any
+          // other arrival, so hand over the next one here — the same job
+          // PlayerControl's movement substrate does for the local player.
+          if (observed.state === 'idle') {
+            const leg = nextLeg(currentPlayer.id)
+            if (leg) {
+              remotePlayerManager.setTargetPosition(
+                currentPlayer.id,
+                leg,
+                observed.rotation
+              )
+            }
+          }
+          currentPlayer.position.set(
+            observed.position.x,
+            observed.position.y,
+            observed.position.z
+          )
+          currentPlayerState = observed
+        }
+      }
       loopProfiler.record(
         'remoteInterpolation',
         performance.now() - remoteInterpolationStart
