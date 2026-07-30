@@ -112,9 +112,7 @@ agent-client/data/cache/
 # openmmo-client is its own repository, cloned in here.
 /openmmo-client/
 
-# openmmo-client: overlay symlinks created by openmmo-client/scripts/link.sh.
-# The real files live in openmmo-client/overlay/ so a rebase never touches them.
+# openmmo-client: remaining desktop-owned overlay symlinks. Web-client
+# spectator/manual sources are tracked normally on tweak-agent-client.
 /agent-client/src/mirror.rs
-/client/src/lib/stores/observerStore.ts
-/client/src/lib/managers/observedPath.ts
 /agent-client/data/user_prompt.txt
