@@ -11,6 +11,7 @@
   import RenderFrameLimiter from './lib/components/RenderFrameLimiter.svelte'
   import { gameStore } from './lib/stores/gameStore'
   import { isObserver } from './lib/stores/observerStore'
+  import { decodeManualBootstrap } from './lib/stores/manualBootstrap'
   import { createWebGPURenderer } from './lib/utils/renderer'
   import {
     networkManager,
@@ -28,6 +29,7 @@
   } from './lib/stores/graphicsSettings'
 
   let showSettings = $state(false)
+  const manualBootstrap = decodeManualBootstrap(window.location.hash)
 
   type AppScreen = 'login' | 'character-select' | 'character-create' | 'game'
   type DeathUiState =
@@ -35,7 +37,9 @@
     | 'waiting_dying'
     | 'dialog_open'
     | 'dialog_closed'
-  let screen = $state<AppScreen>(isObserver ? 'game' : 'login')
+  let screen = $state<AppScreen>(
+    isObserver || manualBootstrap ? 'game' : 'login'
+  )
   let observerError = $state('')
   let serverUrl = $state('')
   let accountName = $state('')
@@ -52,14 +56,18 @@
 
   /// Connected to the mirror but the agent has not entered the world yet.
   let observerWaiting = $derived(
-    isObserver && !observerError && !currentPlayerHp
+    (isObserver || manualBootstrap !== null) &&
+      !observerError &&
+      !currentPlayerHp
   )
   /// Normal play only reaches the game screen after JoinSuccess, so the scene
   /// mounts knowing where it is. A spectator opens straight onto 'game', and
   /// building the world around the origin first — then restreaming every tile
   /// once the real position arrives — keeps frame times over the threshold
   /// that dismisses the loading dialog. Wait for the character instead.
-  let sceneCanMount = $derived(!isObserver || currentPlayerHp !== null)
+  let sceneCanMount = $derived(
+    (!isObserver && !manualBootstrap) || currentPlayerHp !== null
+  )
   let currentPlayerLevel = $state<number | null>(null)
   let currentPlayerTotalXp = $state<number | null>(null)
   let deathUiState = $state<DeathUiState>('alive')
@@ -99,6 +107,53 @@
     void networkManager.observe().then((result) => {
       if (!result.ok) observerError = result.message ?? 'Agent is not reachable'
     })
+  })
+
+  // Desktop manual mode already completed OAuth and character selection.
+  // Consume the short-lived fragment once, clear it from browser history, and
+  // enter that exact character without rendering duplicate onboarding.
+  onMount(() => {
+    if (!manualBootstrap || isObserver) return
+    history.replaceState(null, '', `${location.pathname}${location.search}`)
+    void networkManager
+      .requestAuthentication(
+        manualBootstrap.serverUrl,
+        manualBootstrap.googleIdToken
+      )
+      .then(async (authenticated) => {
+        if (!authenticated.ok) {
+          observerError = authenticated.message ?? 'Authentication failed'
+          window.parent.postMessage(
+            { type: 'openmmo-manual-error', error: observerError },
+            '*'
+          )
+          return
+        }
+        serverUrl = manualBootstrap.serverUrl
+        accountName = authenticated.accountName ?? ''
+        accountCharacters = authenticated.characters ?? []
+        selectedCharacterId = manualBootstrap.characterId
+        const entered = await networkManager.requestEnterGame(
+          manualBootstrap.characterId
+        )
+        if (!entered.ok) {
+          observerError = entered.message ?? 'Could not enter the game'
+          window.parent.postMessage(
+            { type: 'openmmo-manual-error', error: observerError },
+            '*'
+          )
+          return
+        }
+        window.parent.postMessage({ type: 'openmmo-manual-ready' }, '*')
+      })
+      .catch((error: unknown) => {
+        observerError =
+          error instanceof Error ? error.message : 'Could not enter the game'
+        window.parent.postMessage(
+          { type: 'openmmo-manual-error', error: observerError },
+          '*'
+        )
+      })
   })
 
   onMount(() => {
