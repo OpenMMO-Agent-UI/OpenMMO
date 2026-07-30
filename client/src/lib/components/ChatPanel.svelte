@@ -6,6 +6,7 @@
   import { handleCommand, visibleCommandNames } from '../chat-commands'
   import { chatInputKeyIntent } from '../chat-input-keys'
   import { chatFocusRequest } from '../stores/npcMenuStore'
+  import { isObserver } from '../stores/observerStore'
   import {
     translationEnabled,
     translationTargetLanguage,
@@ -201,6 +202,7 @@
   }
 
   function handleGlobalKeydown(event: KeyboardEvent) {
+    if (isObserver) return
     if (event.isComposing || event.keyCode === 229) return
     if (event.key === 'Enter' && document.activeElement !== chatInput) {
       event.preventDefault()
@@ -312,39 +314,43 @@
     </div>
   </div>
 
-  <div class="chat-input" class:disconnected={!isConnected}>
-    <div class="input-wrap">
-      {#if commandGhost}
-        <div class="input-ghost" aria-hidden="true">
-          <span class="ghost-typed">{messageInput}</span><span
-            class="ghost-suffix">{commandGhost}</span
-          >
-        </div>
-      {/if}
-      <input
-        type="text"
-        bind:this={chatInput}
-        bind:value={messageInput}
-        onkeydown={handleKeyDown}
-        onfocus={() => {
-          inputFocused = true
-          activeTab = 'say'
-        }}
-        onblur={() => {
-          inputFocused = false
-          restoreViewportAfterKeyboard()
-        }}
-        placeholder="Type a message... (/help for commands)"
-        disabled={!isConnected}
-      />
+  <!-- A spectator cannot talk: every send path is a no-op, and the mirror
+       relays the transcript read-only. -->
+  {#if !isObserver}
+    <div class="chat-input" class:disconnected={!isConnected}>
+      <div class="input-wrap">
+        {#if commandGhost}
+          <div class="input-ghost" aria-hidden="true">
+            <span class="ghost-typed">{messageInput}</span><span
+              class="ghost-suffix">{commandGhost}</span
+            >
+          </div>
+        {/if}
+        <input
+          type="text"
+          bind:this={chatInput}
+          bind:value={messageInput}
+          onkeydown={handleKeyDown}
+          onfocus={() => {
+            inputFocused = true
+            activeTab = 'say'
+          }}
+          onblur={() => {
+            inputFocused = false
+            restoreViewportAfterKeyboard()
+          }}
+          placeholder="Type a message... (/help for commands)"
+          disabled={!isConnected}
+        />
+      </div>
+      <button
+        onclick={sendMessage}
+        disabled={!isConnected || !messageInput.trim()}
+      >
+        Send
+      </button>
     </div>
-    <button
-      onclick={sendMessage}
-      disabled={!isConnected || !messageInput.trim()}
-    >
-      Send
-    </button>
-  </div>
+  {/if}
 </div>
 
 <style>
