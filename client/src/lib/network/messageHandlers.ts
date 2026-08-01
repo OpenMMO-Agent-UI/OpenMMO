@@ -26,7 +26,7 @@ import {
 } from '../stores/observerStore'
 import { monsterManager } from '../managers/monsterManager'
 import { housingManager } from '../managers/housingManager'
-import { bridgeManager } from '../managers/bridgeManager'
+import { entityGroundY } from '../managers/entity-ground'
 import { objectManager } from '../managers/objectManager'
 import { groundItemManager } from '../managers/groundItemManager'
 import { dungeonManager } from '../managers/dungeonManager'
@@ -265,22 +265,33 @@ export function handleServerMessage(
         ...state,
         currentPlayer: player,
       }))
+      // Players who logged out inside a dungeon reconnect there — synced
+      // before anything below queries dungeon height, or the spawn Y below
+      // reads dungeonManager as inactive and falls back to the raw server Y.
+      dungeonManager.syncFromFloorLevel(
+        serverPlayer.floor_level ?? 0,
+        serverPlayer.position.x,
+        serverPlayer.position.z
+      )
       // A spectator has no movement FSM of its own: the agent's walk arrives
       // as PlayerMoved, so it is interpolated like a remote player.
       if (isObserver) {
         setObservedPlayerId(serverPlayer.id)
         remotePlayerManager.initPlayer(
           serverPlayer.id,
-          serverPlayer.position,
+          {
+            ...serverPlayer.position,
+            y: entityGroundY(
+              remotePlayerManager.heightManager,
+              serverPlayer.floor_level ?? 0,
+              serverPlayer.position.x,
+              serverPlayer.position.z,
+              serverPlayer.position.y
+            ),
+          },
           serverPlayer.rotation
         )
       }
-      // Players who logged out inside a dungeon reconnect there.
-      dungeonManager.syncFromFloorLevel(
-        serverPlayer.floor_level ?? 0,
-        serverPlayer.position.x,
-        serverPlayer.position.z
-      )
       events.joinSuccess.emit()
       break
     }
@@ -373,24 +384,40 @@ export function handleServerMessage(
       if (!isObserver && state.currentPlayer?.id === data.player_id) {
         break
       }
-      const deckY = bridgeManager.findDeckYAt(
-        data.position.x,
-        data.position.z,
-        null
-      )
-      const moveTo = {
-        x: data.position.x,
-        y: deckY ?? data.position.y,
-        z: data.position.z,
-      }
+      const floorLevel = data.floor_level ?? 0
       // A gap the walk cannot close is a desync, not a step — see
       // farEnoughToSnap. Only for the watched character, whose positions are
       // synthesized from its own outbound moves; everyone else here arrives
       // exactly as they do in normal play.
-      const drawnAt =
-        isObserver && state.currentPlayer?.id === data.player_id
-          ? remotePlayerManager.players.get(data.player_id)?.position
-          : undefined
+      const isWatchedSelf = isObserver && state.currentPlayer?.id === data.player_id
+      // Walking into a dungeon arrives here as ordinary PlayerMoved frames,
+      // never PlayerTeleported — dungeonManager has to be told the same way
+      // JoinSuccess/PlayerTeleported already do, or floorHeightAt below stays
+      // inactive and silently falls back to the raw, uncorrected server Y.
+      // Only the watched character's own moves should touch this — it's a
+      // singleton, and every other entity's move here belongs to someone else.
+      if (isWatchedSelf) {
+        dungeonManager.syncFromFloorLevel(floorLevel, data.position.x, data.position.z)
+      }
+      // entityGroundY resolves dungeon/housing/bridge/terrain by floor level
+      // itself — a bare bridgeManager lookup here would have no floor concept
+      // and could pick up a surface bridge's height for a position that's
+      // actually underground, since dungeon interiors reuse the same XZ range
+      // as the surface near their entrance.
+      const moveTo = {
+        x: data.position.x,
+        y: entityGroundY(
+          remotePlayerManager.heightManager,
+          floorLevel,
+          data.position.x,
+          data.position.z,
+          data.position.y
+        ),
+        z: data.position.z,
+      }
+      const drawnAt = isWatchedSelf
+        ? remotePlayerManager.players.get(data.player_id)?.position
+        : undefined
       if (drawnAt && farEnoughToSnap(drawnAt, moveTo)) {
         clearRoute(data.player_id)
         remotePlayerManager.teleportPlayer(
@@ -404,7 +431,7 @@ export function handleServerMessage(
       // in it — see observedPath, which routes around what does and leaves a
       // clear line alone.
       const leg = drawnAt
-        ? routeObserved(data.player_id, drawnAt, moveTo, data.floor_level ?? 0)
+        ? routeObserved(data.player_id, drawnAt, moveTo, floorLevel)
         : moveTo
       remotePlayerManager.setTargetPosition(data.player_id, leg, data.rotation)
       const existing = state.otherPlayers.get(data.player_id)
@@ -427,17 +454,20 @@ export function handleServerMessage(
 
     case 'PlayerTeleported': {
       const state = get(gameStore)
+      const floorLevel = data.floor_level ?? 0
       if (state.currentPlayer && state.currentPlayer.id === data.player_id) {
-        state.currentPlayer.position.set(
+        // Sync before computing Y below, or a teleport straight into a
+        // dungeon reads dungeonManager as still inactive and falls back to
+        // the raw, uncorrected server Y — same trap as PlayerMoved above.
+        dungeonManager.syncFromFloorLevel(floorLevel, data.position.x, data.position.z)
+        const y = entityGroundY(
+          remotePlayerManager.heightManager,
+          floorLevel,
           data.position.x,
-          data.position.y,
-          data.position.z
+          data.position.z,
+          data.position.y
         )
-        dungeonManager.syncFromFloorLevel(
-          data.floor_level ?? 0,
-          data.position.x,
-          data.position.z
-        )
+        state.currentPlayer.position.set(data.position.x, y, data.position.z)
         requestCameraReset()
         // Any teleport settles the summon toast — an accepted one succeeded,
         // and one surviving the player's own departure would mislead.
@@ -445,20 +475,22 @@ export function handleServerMessage(
         if (isObserver) {
           remotePlayerManager.teleportPlayer(
             data.player_id,
-            data.position,
+            { ...data.position, y },
             data.rotation
           )
         }
         break
       }
-      const tpDeckY = bridgeManager.findDeckYAt(
+      const tpY = entityGroundY(
+        remotePlayerManager.heightManager,
+        floorLevel,
         data.position.x,
         data.position.z,
-        null
+        data.position.y
       )
       remotePlayerManager.teleportPlayer(
         data.player_id,
-        tpDeckY !== null ? { ...data.position, y: tpDeckY } : data.position,
+        { ...data.position, y: tpY },
         data.rotation
       )
       break
