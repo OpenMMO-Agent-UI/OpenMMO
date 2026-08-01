@@ -14,6 +14,9 @@ import {
   type PlayerState,
 } from '../utils/movementUtils'
 import { entityGroundY } from './entity-ground'
+import { dungeonManager } from './dungeonManager'
+import { currentDungeonDepth } from '../stores/dungeonStore'
+import { observedPlayerId } from '../stores/observerStore'
 import { FishingAnimationName } from '../types/animations'
 import { shortestWrappedDeltaX } from '../terrain/world-wrap'
 import type { TerrainHeightManager } from './terrainHeightManager'
@@ -143,13 +146,24 @@ class PlayerStateManager {
         dt
       )
 
+      // The watched character in observer mode is deliberately never in
+      // otherPlayers (it lives in currentPlayer instead — see
+      // messageHandlers.ts's GameState snapshot), so that lookup always
+      // misses for it and silently floors to floorLevel 0. dungeonManager's
+      // own live depth is the only place that id's real floor still is,
+      // mirroring how sampleHeightAt sources it for the local player.
+      const floorLevel =
+        playerId === observedPlayerId() && dungeonManager.active
+          ? -get(currentDungeonDepth)
+          : (otherPlayers.get(playerId)?.floorLevel ?? 0)
+
       // calculateMovementStep only advances XZ and carries Y over, and the
       // move protocol has no per-waypoint Y, so the ground has to be
       // resampled here. Without it a remote keeps the Y it entered the floor
       // with, which reads as sinking through dungeon and house stairs.
       result.newPos.y = entityGroundY(
         this.heightManager,
-        otherPlayers.get(playerId)?.floorLevel ?? 0,
+        floorLevel,
         result.newPos.x,
         result.newPos.z,
         currentPos.y
