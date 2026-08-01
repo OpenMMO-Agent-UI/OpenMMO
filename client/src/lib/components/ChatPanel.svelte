@@ -193,7 +193,9 @@
     void interacting
     transcriptVisible = true
     window.clearTimeout(fadeTimer)
-    if (!interacting) {
+    // A spectator has no chat input to focus, so hover is the only thing
+    // that could keep `interacting` true — never fade instead of relying on it.
+    if (!interacting && !isObserver) {
       fadeTimer = window.setTimeout(() => {
         transcriptVisible = false
       }, TRANSCRIPT_FADE_DELAY_MS)
