@@ -13,7 +13,9 @@ export function decodeManualBootstrap(hash: string): ManualBootstrap | null {
     const bytes = Uint8Array.from(atob(padded), (character) =>
       character.charCodeAt(0)
     )
-    const value = JSON.parse(new TextDecoder().decode(bytes)) as Partial<ManualBootstrap>
+    const value = JSON.parse(
+      new TextDecoder().decode(bytes)
+    ) as Partial<ManualBootstrap>
     const server = new URL(value.serverUrl ?? '')
     if (server.protocol !== 'ws:' && server.protocol !== 'wss:') return null
     if (
