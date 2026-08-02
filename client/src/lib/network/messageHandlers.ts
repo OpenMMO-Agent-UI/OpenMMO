@@ -448,7 +448,8 @@ export function handleServerMessage(
       // farEnoughToSnap. Only for the watched character, whose positions are
       // synthesized from its own outbound moves; everyone else here arrives
       // exactly as they do in normal play.
-      const isWatchedSelf = isObserver && state.currentPlayer?.id === data.player_id
+      const isWatchedSelf =
+        isObserver && state.currentPlayer?.id === data.player_id
       // Walking into a dungeon arrives here as ordinary PlayerMoved frames,
       // never PlayerTeleported — dungeonManager has to be told the same way
       // JoinSuccess/PlayerTeleported already do, or floorHeightAt below stays
@@ -456,7 +457,11 @@ export function handleServerMessage(
       // Only the watched character's own moves should touch this — it's a
       // singleton, and every other entity's move here belongs to someone else.
       if (isWatchedSelf) {
-        dungeonManager.syncFromFloorLevel(floorLevel, data.position.x, data.position.z)
+        dungeonManager.syncFromFloorLevel(
+          floorLevel,
+          data.position.x,
+          data.position.z
+        )
       }
       // entityGroundY resolves dungeon/housing/bridge/terrain by floor level
       // itself — a bare bridgeManager lookup here would have no floor concept
@@ -523,7 +528,11 @@ export function handleServerMessage(
         // Sync before computing Y below, or a teleport straight into a
         // dungeon reads dungeonManager as still inactive and falls back to
         // the raw, uncorrected server Y — same trap as PlayerMoved above.
-        dungeonManager.syncFromFloorLevel(floorLevel, data.position.x, data.position.z)
+        dungeonManager.syncFromFloorLevel(
+          floorLevel,
+          data.position.x,
+          data.position.z
+        )
         const y = entityGroundY(
           remotePlayerManager.heightManager,
           floorLevel,
