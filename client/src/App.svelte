@@ -19,7 +19,8 @@
     type CharacterClass,
     type Gender,
   } from './lib/network/socket'
-  import { startBgm } from './lib/managers/bgmManager'
+  import { startBgm, bgmVolume, bgmMuted } from './lib/managers/bgmManager'
+  import { sfxVolume, sfxMuted } from './lib/managers/sfxManager'
   import SettingsPanel from './lib/components/SettingsPanel.svelte'
   import { runGpuBenchmark } from './lib/utils/gpuBenchmark'
   import {
@@ -154,6 +155,26 @@
           '*'
         )
       })
+  })
+
+  // Desktop app's Settings > Audio tab: its own window is a different origin
+  // (file://) with no access to this page's localStorage, so it relays
+  // volume/mute changes here instead of setting them directly.
+  onMount(() => {
+    if (!isObserver && !manualBootstrap) return
+    const onAudioMessage = (event: MessageEvent) => {
+      if (event.data?.type !== 'openmmo-set-audio') return
+      if (typeof event.data.bgmVolume === 'number')
+        bgmVolume.set(event.data.bgmVolume)
+      if (typeof event.data.bgmMuted === 'boolean')
+        bgmMuted.set(event.data.bgmMuted)
+      if (typeof event.data.sfxVolume === 'number')
+        sfxVolume.set(event.data.sfxVolume)
+      if (typeof event.data.sfxMuted === 'boolean')
+        sfxMuted.set(event.data.sfxMuted)
+    }
+    window.addEventListener('message', onAudioMessage)
+    return () => window.removeEventListener('message', onAudioMessage)
   })
 
   onMount(() => {
