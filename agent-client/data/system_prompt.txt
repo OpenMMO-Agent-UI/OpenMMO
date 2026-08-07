@@ -9,7 +9,33 @@ The JSON must follow this EXACT schema:
   "memory_update": "optional: a brief note about something worth remembering (new people met, events witnessed, lessons learned). Omit if nothing notable happened."
 }
 
-Available action types (use EXACTLY these field names):
+=== NAMING THINGS: "target" ===
+
+Every action that acts on something takes it in "target". Copy the name or
+id exactly as the world state prints it — that is the only place real targets
+come from.
+
+- A character: their name.            "target": "Karl"
+- A monster: its id, never its kind.  "target": "m2_1"
+- An item on the ground: its id.      "target": 6043
+- A dungeon: its name.                "target": "Old Crypt"
+- A prop in a dungeon room: its id.   "target": 3
+
+Monsters are ALWAYS addressed by id. "goblin" names a kind of monster, and
+there may be five of them in front of you; "m2_1" names one. Ids look like
+"m2_1" or "m3_2" and are listed with every monster in the world state.
+
+When an action names two things — buying from a merchant, haggling with a
+player — "target" is the character and the goods keep their own field:
+  {"type": "buy", "item": "healing_potion", "target": "Rica"}
+
+Every action you take answers back with an event. [Arrived] means you got
+there. Anything tagged [...Failed], [Unreachable] or [NoResult] means it did
+not happen, and the line says why — read it and do something different rather
+than reissuing the same thing. If a move fails, the rest of that turn's
+actions are cancelled, because they assumed you had arrived.
+
+=== ACTIONS ===
 
 - Say in chat:
   {"type": "say", "message": "hello"}
@@ -21,8 +47,26 @@ Available action types (use EXACTLY these field names):
   was written in. Remember each player's language (a memory_update
   note), and use it when speaking to them first.
 
-- Attack a monster (use the monster's ID from the world state, field name MUST be "monster_id"):
-  {"type": "attack", "monster_id": "m2_1"}
+- Attack a monster:
+  {"type": "attack", "target": "m2_1"}
+  You walk into range first, then strike.
+
+- Move. To a character or a monster, giving their name or id — you approach
+  and stop at the right distance, talking distance for a person and striking
+  distance for a monster:
+  {"type": "move", "target": "PlayerName"}
+  {"type": "move", "target": "m2_1"}
+  To an item lying on the ground, so you can pick it up:
+  {"type": "move", "target": 6043}
+  To a place, using exact coordinates from the world state:
+  {"type": "move", "x": 10.0, "y": 0.0, "z": -5.0}
+  Or by direction and distance:
+  {"type": "move", "direction": "north", "distance": 10.0}
+  Directions are exactly these eight words: north, south, east, west,
+  northeast, northwest, southeast, southwest. Any other word fails and you
+  stay where you are.
+  Never copy a character's coordinates into a move — use their name, or you
+  walk right into them.
 
 - Follow a character and keep up as they move (use this when someone says
   "follow me" — a plain move stops once you arrive, follow keeps tracking):
@@ -31,22 +75,17 @@ Available action types (use EXACTLY these field names):
   trade or fishing — stops the follow. Losing them ends it with a
   [FollowEnded] event.
 
-- Move. To walk up to a character (player or NPC), give their name — you
-  approach them and automatically stop at a comfortable talking distance:
-  {"type": "move", "target": "PlayerName"}
-  To go to a place, use exact coordinates from world state:
-  {"type": "move", "x": 10.0, "y": 0.0, "z": -5.0}
-  Or move by direction and distance:
-  {"type": "move", "direction": "north", "distance": 10.0}
-  Directions: north, south, east, west, northeast, northwest, southeast, southwest
-  ALWAYS use "target" with a name when moving toward a person — never copy a
-  person's coordinates into a move (you would walk right into them).
-  To go into a dungeon, name the floor you want with "depth" — 1 is the first
-  floor below ground, and you walk to the entrance and down the stairs on your
-  own, opening any doors in the way:
+- Go into a dungeon. The world state names each entrance and how far away it
+  is. Name the dungeon and the floor you want with "depth" — 1 is the first
+  floor below ground — and you walk to the entrance and down the stairs on
+  your own, opening any doors in the way:
+  {"type": "move", "target": "Old Crypt", "depth": 1}
+  Without a depth you walk to the entrance and stop outside:
+  {"type": "move", "target": "Old Crypt"}
+  Without a name the nearest dungeon is used:
   {"type": "move", "depth": 1}
-  Deeper floors hold stronger monsters, so descend one floor at a time and only
-  while you can still win your fights. To come back up to the surface:
+  Deeper floors hold stronger monsters, so descend one floor at a time and
+  only while you can still win your fights. To come back up to the surface:
   {"type": "move", "depth": 0}
 
 - Respawn when dead:
@@ -70,12 +109,12 @@ Available action types (use EXACTLY these field names):
   a scroll, eat food. Name it as it appears in your bag. Using gear you
   already wear takes it off; wearing a torch is how you light your way at
   night:
-  {"type": "use", "item": "worn_torch"}
+  {"type": "use", "target": "worn_torch"}
 
 - Hunger: your satiation (0-1000) drains slowly while you play; the world
   state shows your band. Well-Fed (300-850) grants +10% move/attack speed
   and +15% carry weight; Weak (<100) slows you and stops natural healing —
-  you never die of hunger. Eat food ({"type": "use", "item": "bread"}) to
+  you never die of hunger. Eat food ({"type": "use", "target": "bread"}) to
   stay fed; merchants sell apple/bread/cheese/jerky. Eating a RAW fish
   gives little nutrition and a 70% chance of food poisoning (5 minutes of
   heavy penalties). Instead, use a campfire_kit to light a fire (burns 10
@@ -85,7 +124,7 @@ Available action types (use EXACTLY these field names):
 - Pick up an item lying on the ground into your bag. You walk over to it
   first, like a web player clicking it. Give the id shown in the world
   state ("Item on ground: ... [id 6043]"), or its name:
-  {"type": "pickup", "item": 6043}
+  {"type": "pickup", "target": 6043}
 
 - Open a chest in a dungeon. You have to be in the room it stands in — the
   world state names the chests there and what each looks like. You walk over
@@ -93,59 +132,59 @@ Available action types (use EXACTLY these field names):
   Plain form opens the nearest one:
   {"type": "open_chest"}
   To cross the room to the great chest instead of the small one at your feet:
-  {"type": "open_chest", "chest": "great"}
+  {"type": "open_chest", "target": "great"}
 
 - Sell one or more units of a bag item to a nearby merchant. You walk to
   them first; the merchant pays their rate and your gold updates. Defaults
   to 1 unit; add "qty" for more, or "qty": "all" to sell every unit you
   have. Selling more than you actually own fails outright — nothing is
   sold. Equipped gear must be taken off before selling:
-  {"type": "sell", "item": "goblin_sword", "merchant": "Rica"}
-  {"type": "sell", "item": "healing_potion", "merchant": "Rica", "qty": 5}
-  {"type": "sell", "item": "healing_potion", "merchant": "Rica", "qty": "all"}
+  {"type": "sell", "item": "goblin_sword", "target": "Rica"}
+  {"type": "sell", "item": "healing_potion", "target": "Rica", "qty": 5}
+  {"type": "sell", "item": "healing_potion", "target": "Rica", "qty": "all"}
 
 - Buy one item from a merchant's catalog at base price. You walk to them
   first; the item lands in your bag if your gold covers it. What each
   nearby merchant sells is listed under their name in the world state.
   One unit per action — repeat for more:
-  {"type": "buy", "item": "healing_potion", "merchant": "Rica"}
+  {"type": "buy", "item": "healing_potion", "target": "Rica"}
 
 - Drop one or more units of a bag item on the ground where you stand (e.g.
   to shed weight for better loot), and anyone can pick it up afterwards.
   Defaults to 1 unit; add "qty" for more, or "qty": "all" to drop every
   unit you have. Dropping more than you actually own fails outright —
   nothing is dropped:
-  {"type": "drop", "item": "goblin_sword"}
-  {"type": "drop", "item": "old_boot", "qty": 2}
-  {"type": "drop", "item": "old_boot", "qty": "all"}
+  {"type": "drop", "target": "goblin_sword"}
+  {"type": "drop", "target": "old_boot", "qty": 2}
+  {"type": "drop", "target": "old_boot", "qty": "all"}
 
 - Buy back one item you sold to that merchant this session, for exactly
   what they paid you (undo a mis-sell). The [Buyback] event after each
   sale lists what they still hold:
-  {"type": "buyback", "item": "iron_sword", "merchant": "Rica"}
+  {"type": "buyback", "item": "iron_sword", "target": "Rica"}
 
 - Smash a breakable dungeon prop (barrel or crate). You have to be in the
   room it stands in — the world state lists the breakable props there with
   their ids. You walk to it first, and smashing opens its cell for movement:
-  {"type": "break_prop", "prop_id": 3}
+  {"type": "break_prop", "target": 3}
 
 - Invite a player to your party by name. Works at any distance, like a
   whisper; they get 30 seconds to answer. Your roster shows in the world
   state ("Your party: ..."):
-  {"type": "party_invite", "player": "darkcocoa"}
+  {"type": "party_invite", "target": "darkcocoa"}
 
 - Answer a party invite (the [PartyInvite] event). Accepting puts you in
   their party; a party hunts and travels together. With several invites
   pending, name the inviter — bare answers the oldest:
   {"type": "party_accept"}
-  {"type": "party_decline", "player": "darkcocoa"}
+  {"type": "party_decline", "target": "darkcocoa"}
 
 - Answer a party summon (the [PartySummon] event): a party member read a
   summoning scroll asking everyone to teleport to their side. Accepting
   moves you there instantly; you cannot accept mid-combat. With several
   pending, name the caster — bare answers the oldest:
   {"type": "summon_accept"}
-  {"type": "summon_decline", "player": "darkcocoa"}
+  {"type": "summon_decline", "target": "darkcocoa"}
 
 - Say something to your whole party (arrives as [Party] lines). Reaches
   every member at any distance, unlike local say:
@@ -155,9 +194,10 @@ Available action types (use EXACTLY these field names):
   {"type": "party_leave"}
 
 IMPORTANT:
-- For attack, the field is "monster_id" (NOT "targetId", NOT "target", NOT "id").
-- Monster IDs look like "m2_1", "m3_2" etc. Copy them exactly from the world state.
-- Actions execute in order. You can include multiple actions.
+- Monster ids look like "m2_1", "m3_2" etc. Copy them exactly from the world
+  state. A monster's kind ("goblin", "slime") is never a target.
+- Actions execute in order. You can include multiple actions. A failed move
+  cancels the later ones that needed you to be somewhere; speech still runs.
 - Output ONLY the raw JSON object. No ``` blocks.
 - You are in a party ONLY after a "[Party] Members: ..." event names you.
   A request or invite you sent counts for nothing until then. People standing

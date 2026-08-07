@@ -46,6 +46,58 @@ use onlinerpg_shared::messages::{PARTY_INVITE_TTL, PARTY_SUMMON_TTL};
 /// radius and the agent's perception radius are guaranteed equal.
 pub(crate) use onlinerpg_shared::NPC_SIGHT_RADIUS;
 
+/// A resolved `move` target.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MoveTarget {
+    Character { id: PlayerId, name: String },
+    Monster { id: String },
+    GroundItem { instance_id: u64, name: String },
+    Prop { prop_id: u32 },
+    Chest { selector: String },
+    Dungeon { id: String, name: String },
+}
+
+/// Why a `move` target did not resolve.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MoveTargetError {
+    /// A monster species where an id belongs, with the ids that match and
+    /// how far away each one is.
+    SpeciesNotId {
+        species: String,
+        candidates: Vec<(String, f32)>,
+    },
+    /// A well-formed monster id that is no longer in sight.
+    MonsterGone { id: String },
+    Unknown {
+        asked: String,
+        addressable: Vec<String>,
+    },
+}
+
+/// Whether a string has the shape of a monster id (`m2_1`), which is how the
+/// ladder tells "the goblin called m2_1" from "a goblin".
+fn looks_like_monster_id(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix(['m', 'M']) else {
+        return false;
+    };
+    let Some((floor, index)) = rest.split_once('_') else {
+        return false;
+    };
+    !floor.is_empty()
+        && !index.is_empty()
+        && floor.bytes().all(|b| b.is_ascii_digit())
+        && index.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Fold a place name for comparison: case and inner spacing carry no meaning
+/// ("orc warrens", "Orc Warrens" and "orc_warrens" are one place).
+fn normalize_place(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 /// A party invite the agent hasn't answered yet.
 pub struct PendingPartyInvite {
     pub inviter_id: PlayerId,
@@ -157,6 +209,12 @@ impl WorldCache {
 
     pub fn dungeon_by_id(&self, id: &str) -> Option<Arc<Dungeon>> {
         self.dungeons.iter().find(|d| d.id == id).map(Arc::clone)
+    }
+
+    /// Every registered dungeon, for name resolution and the world-state
+    /// listing that teaches the agent those names in the first place.
+    pub fn all_dungeons(&self) -> &[Arc<Dungeon>] {
+        &self.dungeons
     }
 
     pub fn open_dungeon_doors(&self, id: &str, depth: u8) -> HashSet<u32> {
@@ -426,6 +484,11 @@ pub struct SharedState {
     bad_song_title_refused: bool,
     /// Synthetic agent-side events (e.g. "player appeared nearby")
     agent_events: Vec<String>,
+    /// Commands an agent action put on the wire, ever. Only read as a
+    /// difference, to tell an action that did something from one that
+    /// evaporated — so background traffic must stay out of it and go through
+    /// [`Self::send_background_command`].
+    action_commands_sent: u64,
     /// Terrain height sampler (shared across NPC connections)
     pub height_sampler: Arc<HeightSampler>,
     /// Shared world cache: passability + houses (shared across NPC connections)
@@ -512,6 +575,7 @@ impl SharedState {
             self_music_rest_until: None,
             bad_song_title_refused: false,
             agent_events: Vec::new(),
+            action_commands_sent: 0,
             height_sampler,
             world_cache,
             is_night: None,
@@ -879,6 +943,22 @@ impl SharedState {
     }
 
     pub async fn send_command(&mut self, msg: ClientMessage) -> anyhow::Result<()> {
+        self.dispatch_command(msg, true).await
+    }
+
+    /// Send something the agent did not ask for. The heartbeat and the
+    /// monster-AI tick fire while an action is still in flight, so counting
+    /// their traffic would credit an action the client dropped with having
+    /// reached the wire and rob the LLM of its `[NoResult]`.
+    pub async fn send_background_command(&mut self, msg: ClientMessage) -> anyhow::Result<()> {
+        self.dispatch_command(msg, false).await
+    }
+
+    async fn dispatch_command(
+        &mut self,
+        msg: ClientMessage,
+        from_action: bool,
+    ) -> anyhow::Result<()> {
         let msg = match msg {
             ClientMessage::PlayerMove {
                 position,
@@ -965,7 +1045,18 @@ impl SharedState {
         self.cmd_tx
             .send(msg)
             .await
-            .map_err(|e| anyhow::anyhow!("Command channel closed: {e}"))
+            .map_err(|e| anyhow::anyhow!("Command channel closed: {e}"))?;
+        if from_action {
+            self.action_commands_sent += 1;
+        }
+        Ok(())
+    }
+
+    /// How much an action has done so far: events pushed and commands that
+    /// actually reached the wire. An action that moves neither counter left no
+    /// trace anywhere — see the `[NoResult]` backstop in `handle_response`.
+    pub fn action_progress(&self) -> (usize, u64) {
+        (self.agent_events.len(), self.action_commands_sent)
     }
 
     /// Apply an authoritative monster pose — server fanout, a reject
@@ -1874,6 +1965,11 @@ impl SharedState {
         std::mem::take(&mut self.agent_events)
     }
 
+    /// Agent events pushed since a mark taken from [`Self::action_progress`].
+    pub fn agent_events_from(&self, from: usize) -> &[String] {
+        self.agent_events.get(from..).unwrap_or(&[])
+    }
+
     /// Record an open we are about to send. A clutter prop is marked opened
     /// right away — the server answers a second open on one with silence, and
     /// an agent that cannot see the silence would retarget it forever. The
@@ -2007,19 +2103,37 @@ impl SharedState {
             }
             return Some(line);
         }
-        let dungeon = self
-            .world_cache
-            .read()
-            .unwrap()
-            .nearest_dungeon(p.position.x, p.position.z)?;
-        let dist = crate::geom::PlanarDelta::between(&p.position, &dungeon.entrance).dist;
-        Some(format!(
-            "Dungeon: {} entrance at ({:.0}, {:.0}), {dist:.0}m away, {} floors deep",
-            dungeon.name,
-            dungeon.entrance.x,
-            dungeon.entrance.z,
-            dungeon.max_depth()
-        ))
+        // Every entrance, nearest first, whatever the distance: a dungeon the
+        // agent never sees named is one it can never ask to move to.
+        let world = self.world_cache.read().unwrap();
+        let mut named: Vec<(f32, String)> = world
+            .all_dungeons()
+            .iter()
+            .map(|d| {
+                let dist = crate::geom::PlanarDelta::between(&p.position, &d.entrance).dist;
+                (
+                    dist,
+                    format!(
+                        "Dungeon: {} entrance at ({:.0}, {:.0}), {dist:.0}m away, {} floors deep",
+                        d.name,
+                        d.entrance.x,
+                        d.entrance.z,
+                        d.max_depth()
+                    ),
+                )
+            })
+            .collect();
+        if named.is_empty() {
+            return None;
+        }
+        named.sort_by(|a, b| a.0.total_cmp(&b.0));
+        Some(
+            named
+                .into_iter()
+                .map(|(_, line)| line)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
     }
 
     /// Whether a dungeon prop has already been smashed.
@@ -2213,6 +2327,157 @@ impl SharedState {
                     || name_or_id.parse::<u64>().is_ok_and(|n| id.get() == n)
             })
             .map(|(id, p)| (*id, p.is_official_npc))
+    }
+
+    /// Resolve a visible `move` target by id shape, then by exact name.
+    pub fn resolve_move_target(&self, raw: &str) -> Result<MoveTarget, MoveTargetError> {
+        let asked = raw.trim();
+
+        if looks_like_monster_id(asked) {
+            return match self
+                .monsters_on_my_floor()
+                .find(|m| m.id.eq_ignore_ascii_case(asked))
+            {
+                Some(m) => Ok(MoveTarget::Monster { id: m.id.clone() }),
+                None => Err(MoveTargetError::MonsterGone {
+                    id: asked.to_string(),
+                }),
+            };
+        }
+
+        if let Ok(n) = asked.parse::<u64>() {
+            if let Some((_, item)) = self
+                .ground_items_in_sight()
+                .iter()
+                .find(|(_, i)| i.instance_id == n)
+            {
+                return Ok(MoveTarget::GroundItem {
+                    instance_id: item.instance_id,
+                    name: item.item_def_id.clone(),
+                });
+            }
+            if let Some(b) = self
+                .breakables_in_sight()
+                .iter()
+                .find(|b| u64::from(b.prop_id) == n)
+            {
+                return Ok(MoveTarget::Prop { prop_id: b.prop_id });
+            }
+            if let Some((id, p)) = self.players_on_my_floor().find(|(id, _)| id.get() == n) {
+                return Ok(MoveTarget::Character {
+                    id: *id,
+                    name: p.name.clone(),
+                });
+            }
+            return Err(self.unknown_target(asked));
+        }
+
+        if let Some((id, p)) = self
+            .players_on_my_floor()
+            .find(|(_, p)| p.name.eq_ignore_ascii_case(asked))
+        {
+            return Ok(MoveTarget::Character {
+                id: *id,
+                name: p.name.clone(),
+            });
+        }
+
+        if let Some(d) = self.dungeon_named(asked) {
+            return Ok(MoveTarget::Dungeon {
+                id: d.id.clone(),
+                name: d.name.clone(),
+            });
+        }
+
+        if asked.to_lowercase().contains("chest") && !self.chests_in_sight().is_empty() {
+            return Ok(MoveTarget::Chest {
+                selector: asked.to_string(),
+            });
+        }
+
+        if let Some((_, item)) = self
+            .ground_items_in_sight()
+            .iter()
+            .find(|(_, i)| i.item_def_id.eq_ignore_ascii_case(asked))
+        {
+            return Ok(MoveTarget::GroundItem {
+                instance_id: item.instance_id,
+                name: item.item_def_id.clone(),
+            });
+        }
+
+        // A species name, not an id. Monsters are only ever addressed by id,
+        // so hand back the ids that match instead of guessing which one.
+        let candidates = self.monster_ids_of_species(asked);
+        if !candidates.is_empty() {
+            return Err(MoveTargetError::SpeciesNotId {
+                species: asked.to_string(),
+                candidates,
+            });
+        }
+
+        Err(self.unknown_target(asked))
+    }
+
+    /// Registered dungeon matching a name (or its registry id), however the
+    /// LLM cased and spaced it.
+    pub fn dungeon_named(&self, asked: &str) -> Option<Arc<Dungeon>> {
+        let key = normalize_place(asked);
+        self.world_cache
+            .read()
+            .unwrap()
+            .all_dungeons()
+            .iter()
+            .find(|d| normalize_place(&d.name) == key || normalize_place(&d.id) == key)
+            .map(Arc::clone)
+    }
+
+    /// Ids and distances of the monsters in sight of a given type, nearest
+    /// first — what a species-instead-of-id mistake gets told to use.
+    fn monster_ids_of_species(&self, species: &str) -> Vec<(String, f32)> {
+        let Some(sp) = self.self_player.as_ref() else {
+            return Vec::new();
+        };
+        let sight_sq = NPC_SIGHT_RADIUS * NPC_SIGHT_RADIUS;
+        let mut found: Vec<(String, f32)> = self
+            .monsters_on_my_floor()
+            .filter(|m| m.monster_type.eq_ignore_ascii_case(species))
+            .filter_map(|m| {
+                let d_sq = m.position.dist_xz_sq(&sp.position);
+                (d_sq <= sight_sq).then(|| (m.id.clone(), d_sq.sqrt()))
+            })
+            .collect();
+        found.sort_by(|a, b| a.1.total_cmp(&b.1));
+        found
+    }
+
+    /// A target that matched nothing, carrying a sample of what would have.
+    fn unknown_target(&self, asked: &str) -> MoveTargetError {
+        let mut addressable: Vec<String> = self
+            .players_on_my_floor()
+            .filter(|(_, p)| self.self_player_id.as_ref() != Some(&p.id))
+            .map(|(_, p)| p.name.clone())
+            .take(4)
+            .collect();
+        addressable.extend(self.monsters_on_my_floor().map(|m| m.id.clone()).take(4));
+        addressable.extend(
+            self.ground_items_in_sight()
+                .iter()
+                .take(3)
+                .map(|(_, i)| format!("{} [id {}]", i.item_def_id, i.instance_id)),
+        );
+        addressable.extend(
+            self.world_cache
+                .read()
+                .unwrap()
+                .all_dungeons()
+                .iter()
+                .map(|d| d.name.clone()),
+        );
+        MoveTargetError::Unknown {
+            asked: asked.to_string(),
+            addressable,
+        }
     }
 
     /// Every bag copy of the resolved item still available this turn.
@@ -3513,5 +3778,160 @@ pub(crate) mod tests {
                 .any(|e| e.contains("You finished \"Twilight Fields\"")),
             "{events:?}"
         );
+    }
+
+    /// A state with one of everything a `move` target can name, so the ladder
+    /// is exercised against a populated world rather than an empty one.
+    fn targetable_state() -> (SharedState, mpsc::Receiver<ClientMessage>) {
+        let (mut s, rx) = test_state();
+        let me = test_player(0.0, 0.0);
+        s.self_player_id = Some(me.id);
+        s.self_player = Some(me);
+
+        let mut karl = test_player(3.0, 0.0);
+        karl.id = PlayerId::from(2);
+        karl.name = "Karl".to_string();
+        s.nearby_players.insert(karl.id, karl);
+
+        let mut near = monster("m2_1");
+        near.monster_type = "goblin".to_string();
+        near.position = p(5.0, 0.0, 0.0);
+        let mut far = monster("m2_7");
+        far.monster_type = "goblin".to_string();
+        far.position = p(12.0, 0.0, 0.0);
+        let mut other = monster("m2_9");
+        other.monster_type = "slime".to_string();
+        other.position = p(4.0, 0.0, 0.0);
+        for m in [near, far, other] {
+            s.nearby_monsters.insert(m.id.clone(), m);
+        }
+
+        s.remember_ground_item(ground_item(6043, "torch", 2.0, 0.0, 0));
+        (s, rx)
+    }
+
+    /// The shape of the string picks the namespace before any name lookup
+    /// runs, so an id and a name never compete.
+    #[test]
+    fn a_move_target_resolves_by_shape_then_by_name() {
+        let (s, _rx) = targetable_state();
+
+        assert_eq!(
+            s.resolve_move_target("m2_1"),
+            Ok(MoveTarget::Monster {
+                id: "m2_1".to_string()
+            })
+        );
+        assert_eq!(
+            s.resolve_move_target("6043"),
+            Ok(MoveTarget::GroundItem {
+                instance_id: 6043,
+                name: "torch".to_string()
+            })
+        );
+        assert_eq!(
+            s.resolve_move_target("karl"),
+            Ok(MoveTarget::Character {
+                id: PlayerId::from(2),
+                name: "Karl".to_string()
+            })
+        );
+        assert_eq!(
+            s.resolve_move_target("torch"),
+            Ok(MoveTarget::GroundItem {
+                instance_id: 6043,
+                name: "torch".to_string()
+            })
+        );
+    }
+
+    /// A species is not an id, and saying so with the matching ids is what
+    /// lets the LLM fix the target on its next turn.
+    #[test]
+    fn a_monster_species_is_refused_with_the_ids_that_would_work() {
+        let (s, _rx) = targetable_state();
+
+        let Err(MoveTargetError::SpeciesNotId {
+            species,
+            candidates,
+        }) = s.resolve_move_target("goblin")
+        else {
+            panic!("expected a species rejection");
+        };
+        assert_eq!(species, "goblin");
+        // Nearest first, and only the goblins.
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            ["m2_1", "m2_7"]
+        );
+    }
+
+    /// An id that no longer names anything in sight is a dead target, not an
+    /// unknown word — the LLM copied it from a stale world state.
+    #[test]
+    fn a_vanished_monster_id_says_it_is_gone() {
+        let (s, _rx) = targetable_state();
+        assert_eq!(
+            s.resolve_move_target("m2_4"),
+            Err(MoveTargetError::MonsterGone {
+                id: "m2_4".to_string()
+            })
+        );
+    }
+
+    /// Nothing matched, so the reply carries what would have.
+    #[test]
+    fn an_unknown_target_lists_what_is_addressable() {
+        let (s, _rx) = targetable_state();
+        let Err(MoveTargetError::Unknown { addressable, .. }) = s.resolve_move_target("the tavern")
+        else {
+            panic!("expected an unknown target");
+        };
+        assert!(addressable.contains(&"Karl".to_string()), "{addressable:?}");
+        assert!(addressable.contains(&"m2_1".to_string()), "{addressable:?}");
+    }
+
+    /// Dungeon names come from the registry and survive whatever casing and
+    /// spacing the LLM read them back with.
+    #[test]
+    fn a_dungeon_name_resolves_however_it_is_written() {
+        let (s, _rx) = test_state();
+        s.world_cache.write().unwrap().register_dungeons();
+
+        for asked in ["Old Crypt", "old crypt", "old_crypt", "OldCrypt"] {
+            assert_eq!(
+                s.resolve_move_target(asked),
+                Ok(MoveTarget::Dungeon {
+                    id: "old_crypt".to_string(),
+                    name: "Old Crypt".to_string()
+                }),
+                "{asked}"
+            );
+        }
+    }
+
+    /// Entrances are listed above ground whatever the distance: a name the
+    /// agent never sees is a name it can never move to.
+    #[test]
+    fn world_state_names_the_dungeon_entrances() {
+        let (mut s, _rx) = test_state();
+        s.self_player = Some(test_player(-1450.0, 4720.0));
+        s.world_cache.write().unwrap().register_dungeons();
+
+        let lines: Vec<String> = s
+            .format_world_state()
+            .lines()
+            .filter(|l| l.starts_with("Dungeon:"))
+            .map(str::to_string)
+            .collect();
+
+        // Nearest first, and the far one is listed too — the world state is
+        // the only place its name can be learned.
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("Old Crypt"), "{lines:?}");
+        assert!(lines[1].contains("Orc Warrens"), "{lines:?}");
     }
 }
