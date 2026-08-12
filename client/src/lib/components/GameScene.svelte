@@ -58,6 +58,8 @@
   import ObjectOverlay from './map-editor/ObjectOverlay.svelte'
   import HousingEditorCursor from './map-editor/HousingEditorCursor.svelte'
   import { type PlayerState } from '../utils/movementUtils'
+  import { isObserver } from '../stores/observerStore'
+  import { nextLeg } from '../managers/observedPath'
   import {
     SUN_MAX_INTENSITY,
     computeSunLightSnapshot,
@@ -464,6 +466,40 @@
     chatBubbles = state.chatBubbles
   })
 
+  /** Spectator: the scene reads `currentPlayer.position` off the object every
+   *  frame, but the HUD reads it through `$gameStore` — and mutating a Vector3
+   *  in place publishes nothing. For a local player `writePlayerPosition`
+   *  (PlayerControl) does the publishing, and PlayerControl is not mounted for
+   *  an observer, so the minimap stayed frozen wherever the agent stood when
+   *  the mirror connected. Published on the minimap's own quantization rather
+   *  than per frame: republishing the whole store 60×/s would wake every
+   *  subscriber for a move it rounds away. */
+  const POSE_PUBLISH_M = 1
+  const POSE_PUBLISH_RAD = Math.PI / 36
+  let publishedPose: { x: number; z: number; rotation: number } | null = null
+
+  function publishObservedPose(observed: PlayerState): void {
+    const moved =
+      !publishedPose ||
+      Math.hypot(
+        observed.position.x - publishedPose.x,
+        observed.position.z - publishedPose.z
+      ) >= POSE_PUBLISH_M ||
+      Math.abs(observed.rotation - publishedPose.rotation) >= POSE_PUBLISH_RAD
+    if (!moved) return
+    publishedPose = {
+      x: observed.position.x,
+      z: observed.position.z,
+      rotation: observed.rotation,
+    }
+    gameStore.update((state) => {
+      // The position Vector3 is already current; rotation is not, and the
+      // minimap's heading reads it.
+      if (state.currentPlayer) state.currentPlayer.rotation = observed.rotation
+      return state
+    })
+  }
+
   // Monster models reference
   let monsterModels = $state<(Monster | undefined)[]>([])
 
@@ -549,6 +585,34 @@
       // Update remote player interpolation
       const remoteInterpolationStart = performance.now()
       remotePlayerManager.update(deltaTime)
+      // Spectator: the watched agent is interpolated as a remote player, but
+      // the camera, terrain streaming and HUD all read currentPlayer, so its
+      // position and animation state are copied across each frame.
+      if (isObserver && currentPlayer) {
+        const observed = remotePlayerManager.players.get(currentPlayer.id)
+        if (observed) {
+          // A leg of a route around an obstacle (observedPath) ends like any
+          // other arrival, so hand over the next one here — the same job
+          // PlayerControl's movement substrate does for the local player.
+          if (observed.state === 'idle') {
+            const leg = nextLeg(currentPlayer.id)
+            if (leg) {
+              remotePlayerManager.setTargetPosition(
+                currentPlayer.id,
+                leg,
+                observed.rotation
+              )
+            }
+          }
+          currentPlayer.position.set(
+            observed.position.x,
+            observed.position.y,
+            observed.position.z
+          )
+          currentPlayerState = observed
+          publishObservedPose(observed)
+        }
+      }
       loopProfiler.record(
         'remoteInterpolation',
         performance.now() - remoteInterpolationStart
