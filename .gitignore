@@ -110,3 +110,17 @@ agent-client/data/cache/
 
 # ElevenLabs SFX audition candidates (originals live in ~/assets_original/sfx/)
 sfx-candidates/
+
+# The generated config's backup carries the Google installed-app secret that
+# upstream deliberately keeps out of the repo, and memory.txt is the agent's
+# own notes — neither belongs in a commit.
+/agent-client/data/config.toml.bak
+/agent-client/data/memory.txt
+
+# openmmo-client is its own repository, cloned in here.
+/openmmo-client/
+
+# openmmo-client: remaining desktop-owned overlay symlinks. Web-client
+# spectator/manual sources are tracked normally on tweak-agent-client.
+/agent-client/src/mirror.rs
+/agent-client/data/user_prompt.txt

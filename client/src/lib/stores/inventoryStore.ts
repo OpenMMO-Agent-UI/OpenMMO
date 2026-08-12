@@ -5,6 +5,8 @@ import type {
   PlayerInventory,
 } from '../network/networkTypes'
 import { getItemDef } from '../data/itemDefs'
+import { isUnderground } from './dungeonStore'
+import { serverGameTime } from './timeStore'
 
 export type { EquipSlot, ItemInstance, PlayerInventory }
 
@@ -35,6 +37,24 @@ export const localTorchEquipped = derived(inventoryStore, (inv) => {
   const id = inv.equipped.off_hand?.item_def_id
   return isTorchItemDefId(id)
 })
+
+/** Item defs that light the way when a torch would, but are not torches. */
+const SHIELD_ITEM_IDS = ['wooden_shield', 'raven_shield']
+
+export function isShieldItemDefId(id: string | null | undefined): boolean {
+  return id != null && SHIELD_ITEM_IDS.includes(id)
+}
+
+/** Whether the local player's equipped shield should be burning like a torch:
+ *  once the sun is down, or anywhere underground — a shield that went dark in
+ *  a pitch-black dungeon would read as a bug. Client-side only, and the wire
+ *  has no off-hand field, so this can never light a remote player's shield. */
+export const shieldGlowLit = derived(
+  [inventoryStore, serverGameTime, isUnderground],
+  ([inv, time, underground]) =>
+    isShieldItemDefId(inv.equipped.off_hand?.item_def_id) &&
+    (underground || time?.isNight === true)
+)
 
 /** The local player's first revive item (phoenix talisman), offered on the
  *  death dialog together with its def. */
