@@ -10,6 +10,8 @@
   import CharacterCreateScene from './lib/components/CharacterCreateScene.svelte'
   import RenderFrameLimiter from './lib/components/RenderFrameLimiter.svelte'
   import { gameStore } from './lib/stores/gameStore'
+  import { isObserver } from './lib/stores/observerStore'
+  import { decodeManualBootstrap } from './lib/stores/manualBootstrap'
   import { createWebGPURenderer } from './lib/utils/renderer'
   import {
     networkManager,
@@ -17,7 +19,8 @@
     type CharacterClass,
     type Gender,
   } from './lib/network/socket'
-  import { startBgm } from './lib/managers/bgmManager'
+  import { startBgm, bgmVolume, bgmMuted } from './lib/managers/bgmManager'
+  import { sfxVolume, sfxMuted } from './lib/managers/sfxManager'
   import SettingsPanel from './lib/components/SettingsPanel.svelte'
   import { runGpuBenchmark } from './lib/utils/gpuBenchmark'
   import {
@@ -27,6 +30,7 @@
   } from './lib/stores/graphicsSettings'
 
   let showSettings = $state(false)
+  const manualBootstrap = decodeManualBootstrap(window.location.hash)
 
   type AppScreen = 'login' | 'character-select' | 'character-create' | 'game'
   type DeathUiState =
@@ -34,7 +38,10 @@
     | 'waiting_dying'
     | 'dialog_open'
     | 'dialog_closed'
-  let screen = $state<AppScreen>('login')
+  let screen = $state<AppScreen>(
+    isObserver || manualBootstrap ? 'game' : 'login'
+  )
+  let observerError = $state('')
   let serverUrl = $state('')
   let accountName = $state('')
   let accountCharacters = $state<AccountCharacter[]>([])
@@ -47,6 +54,21 @@
   let isPlayerDead = $state(false)
   let currentPlayerHp = $state<number | null>(null)
   let currentPlayerMaxHp = $state<number | null>(null)
+
+  /// Connected to the mirror but the agent has not entered the world yet.
+  let observerWaiting = $derived(
+    (isObserver || manualBootstrap !== null) &&
+      !observerError &&
+      !currentPlayerHp
+  )
+  /// Normal play only reaches the game screen after JoinSuccess, so the scene
+  /// mounts knowing where it is. A spectator opens straight onto 'game', and
+  /// building the world around the origin first — then restreaming every tile
+  /// once the real position arrives — keeps frame times over the threshold
+  /// that dismisses the loading dialog. Wait for the character instead.
+  let sceneCanMount = $derived(
+    (!isObserver && !manualBootstrap) || currentPlayerHp !== null
+  )
   let currentPlayerLevel = $state<number | null>(null)
   let currentPlayerTotalXp = $state<number | null>(null)
   let deathUiState = $state<DeathUiState>('alive')
@@ -78,6 +100,82 @@
   // applied and would raise "restart required" on a first launch. The probe
   // caps itself at 3s and normally finishes long before login completes.
   let showCanvas = $derived(screen !== 'login' && !gpuProbePending)
+
+  // Spectator: there is no login and no character to pick — connect to the
+  // agent's mirror and draw whatever it is seeing.
+  onMount(() => {
+    if (!isObserver) return
+    void networkManager.observe().then((result) => {
+      if (!result.ok) observerError = result.message ?? 'Agent is not reachable'
+    })
+  })
+
+  // Desktop manual mode already completed OAuth and character selection.
+  // Consume the short-lived fragment once, clear it from browser history, and
+  // enter that exact character without rendering duplicate onboarding.
+  onMount(() => {
+    if (!manualBootstrap || isObserver) return
+    history.replaceState(null, '', `${location.pathname}${location.search}`)
+    void networkManager
+      .requestAuthentication(
+        manualBootstrap.serverUrl,
+        manualBootstrap.googleIdToken
+      )
+      .then(async (authenticated) => {
+        if (!authenticated.ok) {
+          observerError = authenticated.message ?? 'Authentication failed'
+          window.parent.postMessage(
+            { type: 'openmmo-manual-error', error: observerError },
+            '*'
+          )
+          return
+        }
+        serverUrl = manualBootstrap.serverUrl
+        accountName = authenticated.accountName ?? ''
+        accountCharacters = authenticated.characters ?? []
+        selectedCharacterId = manualBootstrap.characterId
+        const entered = await networkManager.requestEnterGame(
+          manualBootstrap.characterId
+        )
+        if (!entered.ok) {
+          observerError = entered.message ?? 'Could not enter the game'
+          window.parent.postMessage(
+            { type: 'openmmo-manual-error', error: observerError },
+            '*'
+          )
+          return
+        }
+        window.parent.postMessage({ type: 'openmmo-manual-ready' }, '*')
+      })
+      .catch((error: unknown) => {
+        observerError =
+          error instanceof Error ? error.message : 'Could not enter the game'
+        window.parent.postMessage(
+          { type: 'openmmo-manual-error', error: observerError },
+          '*'
+        )
+      })
+  })
+
+  // Desktop app's Settings > Audio tab: its own window is a different origin
+  // (file://) with no access to this page's localStorage, so it relays
+  // volume/mute changes here instead of setting them directly.
+  onMount(() => {
+    if (!isObserver && !manualBootstrap) return
+    const onAudioMessage = (event: MessageEvent) => {
+      if (event.data?.type !== 'openmmo-set-audio') return
+      if (typeof event.data.bgmVolume === 'number')
+        bgmVolume.set(event.data.bgmVolume)
+      if (typeof event.data.bgmMuted === 'boolean')
+        bgmMuted.set(event.data.bgmMuted)
+      if (typeof event.data.sfxVolume === 'number')
+        sfxVolume.set(event.data.sfxVolume)
+      if (typeof event.data.sfxMuted === 'boolean')
+        sfxMuted.set(event.data.sfxMuted)
+    }
+    window.addEventListener('message', onAudioMessage)
+    return () => window.removeEventListener('message', onAudioMessage)
+  })
 
   onMount(() => {
     if (!gpuProbePending) return
@@ -336,7 +434,7 @@
             characterClass={createSelectedClass}
             gender={createSelectedGender}
           />
-        {:else if screen === 'game'}
+        {:else if screen === 'game' && sceneCanMount}
           <GameScene
             {serverUrl}
             onCurrentPlayerDyingFinished={handleCurrentPlayerDyingFinished}
@@ -345,6 +443,14 @@
           />
         {/if}
       </Canvas>
+    </div>
+  {/if}
+
+  {#if observerError}
+    <div class="observer-error">{observerError}</div>
+  {:else if observerWaiting}
+    <div class="observer-waiting">
+      Waiting for the agent to enter the world…
     </div>
   {/if}
 
@@ -492,5 +598,31 @@
   .settings-btn-corner svg {
     width: 20px;
     height: 20px;
+  }
+
+  .observer-waiting {
+    position: fixed;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10000;
+    padding: 10px 16px;
+    border-radius: 8px;
+    background: rgba(30, 34, 44, 0.9);
+    color: #b9c1d2;
+    font-size: 14px;
+  }
+
+  .observer-error {
+    position: fixed;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10000;
+    padding: 10px 16px;
+    border-radius: 8px;
+    background: rgba(120, 30, 30, 0.92);
+    color: #ffd9d9;
+    font-size: 14px;
   }
 </style>
