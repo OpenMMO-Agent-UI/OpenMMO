@@ -209,14 +209,21 @@ impl MonsterAiManager {
     }
 
     /// Tick all managed monster brains. Returns commands to send.
+    ///
+    /// `self_player` is our own character: the server leaves us out of every
+    /// player frame it sends us, so `nearby_players` never holds it and a
+    /// monster we own would have no valid target in a solo session. The web
+    /// client's `buildNearbyPlayers` prepends it for the same reason.
     pub fn tick_all(
         &mut self,
         delta_ms: f32,
+        self_player: Option<&Player>,
         nearby_players: &HashMap<PlayerId, Player>,
         passability_cache: &PassabilityCache,
     ) -> Vec<ClientMessage> {
-        let players: Vec<NearbyPlayer> = nearby_players
-            .values()
+        let players: Vec<NearbyPlayer> = self_player
+            .into_iter()
+            .chain(nearby_players.values())
             .map(|p| NearbyPlayer {
                 id: p.id,
                 position: p.position,
