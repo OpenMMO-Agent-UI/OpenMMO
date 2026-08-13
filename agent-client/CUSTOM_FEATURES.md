@@ -1,81 +1,145 @@
 # tweak-agent-client custom features
 
-`tweak-agent-client` is a personal customization branch on top of `master`.
-`master` tracks the upstream/official repo and is rebased onto periodically —
-each rebase can conflict with the feature below. This file is the checklist
-used by the `/rebase-tweak-agent-client` command (see
-`.claude/commands/rebase-tweak-agent-client.md`) to confirm the customization
-survived conflict resolution. Keep it in sync: when the customization commit
-is split, renamed, or dropped (because master grew an equivalent/better
-version), update this entry in the same PR/session.
-
-Each entry: what it does, where it lives, how a rebase conflict on it should
-usually be resolved, and how to verify it survived (unit test and/or a live
-signal to grep for).
+Personal customization branch on top of `master`, which tracks upstream and is
+rebased onto periodically. This is the checklist
+`.claude/commands/rebase-tweak-agent-client.md` uses to confirm each
+customization survived a rebase — keep it in sync when one is split, renamed
+or dropped. Each entry: what, where, how to resolve a conflict on it, how to
+verify it survived.
 
 ---
 
 ## 1. Web-client spectator mode
 
-**What**: the web client can open read-only against an agent's mirror socket
-and watch the agent's world live. `isObserver` (from `observerStore`, read off
-the URL) makes `App.svelte` skip login/character-select straight to `game` and
-call `networkManager.observe()`; every send path in `NetworkManager` returns
-early, including `ensureHandshake`, so the mirror's relayed `JoinSuccess` is
-the only handshake. The watched agent arrives as a *remote* player, so
-`GameScene` copies its interpolated position/animation onto `currentPlayer`
-each frame (the camera, terrain streaming and HUD all read `currentPlayer`)
-and hands over the next `observedPath` leg on arrival. `PlayerControl` is not
-mounted, the action cluster and chat input are not rendered, and
-`monsterManager` routes its ownership checks through `ownedByMe()` so a
-spectator never spins up WASM brains competing with the agent's own
-simulation.
+**What**: the client can open read-only against an agent's mirror socket and
+watch its world live. `isObserver` skips login/character-select straight to
+`game` and calls `networkManager.observe()`; every send path returns early,
+so the mirror's relayed `JoinSuccess` is the only handshake. The agent arrives
+as a *remote* player, so `GameScene` copies its position/animation onto
+`currentPlayer` each frame (camera, terrain streaming and HUD all read it) and
+publishes that pose through `gameStore` on the minimap's own quantization —
+mutating the Vector3 in place notifies no subscriber, and the local player's
+publisher (`PlayerControl`) is not mounted here. `PlayerControl`, the action
+cluster and the chat input are not rendered, and `monsterManager` gates
+ownership through `ownedByMe()` so a spectator never runs WASM brains
+competing with the agent's own.
 
 **Lives in**: `client/src/App.svelte` (`screen` init, `observe()` on mount,
-`sceneCanMount`, the waiting/error banners), `client/src/lib/network/socket.ts`
-(`observe()`, the `isObserver` early returns), `client/src/lib/components/
-GameScene.svelte` (the per-frame copy + `nextLeg` handoff),
-`client/src/lib/components/game-scene/GameScenePlayersLayer.svelte`
-(`PlayerControl` gate), `GameHud.svelte` (`.action-cluster` gate),
-`ChatPanel.svelte` (`.chat-input` gate + `handleGlobalKeydown` early return),
-`client/src/lib/managers/monsterManager.ts` (`ownedByMe`),
-`client/vite.config.ts` (`resolve.preserveSymlinks`).
+`sceneCanMount`, banners), `client/src/lib/network/socket.ts` (`observe()`,
+`isObserver` early returns), `client/src/lib/components/GameScene.svelte`
+(per-frame copy, `publishObservedPose`, `nextLeg` handoff), `.../game-scene/
+GameScenePlayersLayer.svelte` (`PlayerControl` gate), `.../GameHud.svelte`
+(`.action-cluster` gate), `.../ChatPanel.svelte` (`.chat-input` gate +
+`handleGlobalKeydown` return), `client/src/lib/managers/monsterManager.ts`
+(`ownedByMe`), `client/vite.config.ts` (`resolve.preserveSymlinks`).
 
-**Conflict resolution note**: the two modules this depends on —
-`client/src/lib/stores/observerStore.ts` and
-`client/src/lib/managers/observedPath.ts` — are **not in this repo**. They are
-symlinks into `~/openmmo-client/overlay/`, created by
-`openmmo-client/scripts/link.sh` and gitignored, precisely so a master rebase
-can never touch them. Only the *call sites* listed above live here, so a
-conflict will always be about a gate (`{#if !isObserver}`, an early return)
-sitting inside code master restructured — keep the gate, adopt master's
-structure around it. `preserveSymlinks` must stay or rollup resolves the
-symlinked modules to their real paths outside the project and their relative
-imports break. If `observerStore` ever fails to resolve, the fix is to run
-`link.sh`, not to vendor the file into this repo.
+**Conflict resolution**: `observerStore.ts` and `observedPath.ts` are **not in
+this repo** — they are gitignored symlinks into `~/openmmo-client/overlay/`
+(`link.sh`), so a rebase can never touch them. Only the call sites above live
+here, so a conflict is always a gate (`{#if !isObserver}`, an early return)
+inside code master restructured: keep the gate, adopt master's structure.
+`preserveSymlinks` must stay or rollup resolves the symlinks outside the
+project and their relative imports break. If `observerStore` fails to resolve,
+run `link.sh` — do not vendor it in.
 
-**Verify**: no unit tests (all Svelte/UI). Static: `npm run check` in
-`client/` must pass — it resolves the symlinked modules, so a broken overlay
-link fails loudly there. A missing-wasm-export error there is stale generated
-output, not a regression: `client/src/lib/wasm/` is gitignored, so run
-`npm run build:wasm` after master adds a `wasm_api.rs` export. Live signal:
-not part of the agent-client run; open the client against a mirror URL and
-confirm the login screen is skipped, no quickslot bar / corner buttons / chat
-input are drawn, and the camera follows the agent.
+**Verify**: no unit tests (all Svelte/UI). `npm run check` in `client/` must
+pass; it resolves the symlinks, so a broken overlay link fails there. A
+missing-wasm-export error is stale generated output — `client/src/lib/wasm/`
+is gitignored, so run `npm run build:wasm` after master adds an export. Live:
+open the client against a mirror URL and confirm login is skipped, no
+quickslot bar / corner buttons / chat input, and the camera follows the agent.
+
+---
+
+## 2. Configurable OpenAI-compatible history cap
+
+**What**: `openai.max_messages` sets how many messages of history the
+OpenAI-compatible backend carries, system prompt included. Replaces a
+hardcoded `MAX_MESSAGES = 41` and defaults to it, so an unset config is
+unchanged. The desktop app writes the key as "Messages kept".
+
+**Lives in**: `agent-client/src/openai.rs` (`OpenAiConfig::max_messages`,
+`DEFAULT_MAX_MESSAGES`, `MIN_MAX_MESSAGES`, the clamp in `endpoint()`, the
+trim in the invoker), `agent-client/src/openrouter.rs` (passes the default).
+
+**Conflict resolution**: `Endpoint` and the invoker are shared with OpenRouter,
+so both constructors must keep setting `max_messages` — OpenRouter passes the
+default rather than growing a key of its own. If master grows its own cap,
+prefer master's and drop this entry. The floor is not optional: the trim
+computes `turn.len() - (max_messages - 1)` on a `usize`, so anything below 3
+underflows and panics mid-turn.
+
+**Verify**: `cargo test -p agent-client openai` —
+`max_messages_never_resolves_below_the_trim_floor`. Live: set it low and grep
+the log for `trimmed conversation history to`.
+
+---
+
+## 3. Rule-based workers
+
+**What**: deterministic, LLM-free engines for Automatic play. `[npcs.worker]`
+picks one (`fighter`, `fisher`, or `none` for the LLM agent) and carries its
+knobs (level margin, low-health threshold, food and potion stock, bag-full
+threshold).
+A worker ticks a small state machine over `SharedState` and runs its
+decisions through the LLM driver's own action executor, so combat,
+pathfinding, looting, trading and the spectator mirror are all reused as-is.
+Turns are mirrored to the watch feed under the kind `worker`, which is what
+keeps the desktop app's action captions working with no model in the loop.
+
+A town trip searches the town rather than glancing at it: the worker walks the
+zone's centre and its four quarters until a merchant is in sight, because
+NPC_SIGHT_RADIUS is smaller than a town and one look from the middle wrote
+every trip off. Zones under 20m a side are map-editor slivers, not towns, and
+are skipped. Restocking buys food from the merchant's own catalog (Wick opens
+with bread, Rica with apples) so an order is never for something unstocked.
+
+Workers respect the desktop app's bag labels: the sell/drop marks written
+into the character's `instance.txt` under the `<!-- BAG LABELS -->` block are
+re-read on every town errand, and only marked loot is sold / marked junk is
+dropped. Unmarked items stay in the bag, so a worker never dumps a full bag
+the player did not get the ok to sell (`labels.rs` parses the block).
+
+**Lives in**: `agent-client/src/driver/worker/` (`mod.rs` the loop and the
+shared survival/town decisions, plus `fighter.rs`, `fisher.rs`, `labels.rs`,
+`tests.rs`) — self-contained. Five touch points outside it:
+`driver/mod.rs` (`mod worker;` + the `pub use`), `orchestrator.rs`
+(`NpcConfig::worker`, entering the game when a worker is configured, spawning
+`worker_driver` in place of the LLM task, the mode log line), `state/mod.rs`
+(`no_spawn_zones` made `pub` — towns are how a worker finds a merchant), and
+`item_defs.rs` (`ItemDef::weight`, for the bag-full check against the
+server's STR×15 carry cap).
+
+**Conflict resolution**: everything under `driver/worker/` is ours; take it
+whole. The touch points are additive one-liners — re-apply them onto master's
+structure rather than keeping our version of the surrounding code. If master
+grows its own non-LLM driver, prefer master's and port the fighter/fisher
+rules onto it. `handle_response`, `tick_combat`, `respawn_due`,
+`request_respawn` and `decline_lapsed_trade` are reached through `super::`,
+so a rename upstream is a compile error here, never silent drift.
+
+**Verify**: `cargo test -p agent-client worker` (34 tests: eligibility and
+level-matched target choice, approach, potion/scroll/eat/town-trip decisions,
+the town-exit rule and the in-town search, loot radius, water selection,
+label parsing, restocking against a merchant's catalog, and that
+every emitted step parses as an action). App side:
+`npm test` covers the `[npcs.worker]` config generation and the LLM-validation
+skip. Live: pick a worker under Settings → Behaviour → Automatic play, hit
+**Apply & restart**, and watch it grind in the spectator view — the Log drawer
+carries its decisions, the Thoughts drawer stays empty. Mark items in the Bag
+drawer, Apply labels, and the next town trip sells only those.
 
 ---
 
 ## Superseded / intentionally dropped (do not re-add without checking master first)
 
-- **All agent-client (Rust) customizations** (2026-07-30) — dropped by
-  request, not master-superseded. This branch used to also carry: monster
-  targeting by level tier, a cross-floor/stairs movement fix, a walking
-  stall-timeout, trade windows not hard-blocking walking away, blocked/failed
-  actions reporting back to the LLM, NPCs thinking without a nearby human
-  audience, combat counted as prompt-pacing activity, a visible monster
-  counting as "active", ground-loot pickup prioritized as Urgent, an anti-loop
-  safeguard for dropped items, and Negan's instance-prompt landmark/vendor
-  knowledge. None of that remains on this branch; only the web-client
-  spectator mode above is still customized. Recoverable from tag
-  `backup/tweak-agent-client-pre-feature-drop-20260730-1920` if any of it is
-  wanted back — check whether master has grown an equivalent feature first.
+- **All pre-2026-07-30 agent-client (Rust) customizations** — dropped by
+  request, not master-superseded: monster targeting by level tier, cross-floor
+  stairs movement fix, walking stall-timeout, trade windows not blocking
+  walking away, blocked/failed actions reported to the LLM, NPCs thinking with
+  no human nearby, combat and visible monsters counting as "active",
+  ground-loot pickup as Urgent, dropped-item anti-loop, Negan's instance-prompt
+  landmarks. Not on this branch and **not recoverable** — the
+  `backup/tweak-agent-client-pre-feature-drop-20260730-1920` tag they were
+  parked on no longer exists. If one surfaces in a conflict it is master's
+  code, not ours.
