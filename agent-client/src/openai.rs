@@ -29,14 +29,11 @@ pub struct OpenAiConfig {
     /// budget goes to the reply; "" omits the field for models that reject an
     /// unrecognized value.
     pub reasoning_effort: String,
-    /// How many messages of conversation history to carry, system prompt
-    /// included. Lower it for a small context window, raise it to let the
-    /// agent remember more of the session.
+    /// Conversation history carried per call, system prompt included.
     pub max_messages: usize,
 }
 
-/// System prompt plus 20 user/assistant pairs — what this was hardcoded to
-/// before it became configurable, and what OpenRouter still uses.
+/// System prompt plus 20 user/assistant pairs. OpenRouter still uses it.
 pub const DEFAULT_MAX_MESSAGES: usize = 41;
 
 /// Below this the trim would drop the system prompt or the turn being sent.
@@ -86,8 +83,7 @@ impl OpenAiConfig {
             temperature: self.temperature,
             reasoning_effort: (!self.reasoning_effort.is_empty())
                 .then(|| self.reasoning_effort.clone()),
-            // Clamped, not rejected: a config asking for 1 message should still
-            // start, and the trim below subtracts from the length.
+            // Clamped, not rejected: a bad value should still start.
             max_messages: self.max_messages.max(MIN_MAX_MESSAGES),
         })
     }
@@ -224,8 +220,7 @@ impl LlmBackend for OpenAiInvoker {
             content: content.to_string(),
         });
 
-        // Trim conversation history if it gets too long (keep the system
-        // prompt plus the most recent turns, up to the configured cap).
+        // Keep the system prompt plus the most recent turns, up to the cap.
         let max_messages = self.endpoint.max_messages.max(MIN_MAX_MESSAGES);
         if turn.len() > max_messages {
             let system = turn[0].clone();
@@ -292,9 +287,8 @@ mod tests {
         .is_err());
     }
 
-    /// The trim subtracts `max_messages - 1` from a Vec length, so anything
-    /// under 3 would underflow a usize and panic mid-turn rather than merely
-    /// forgetting more history.
+    /// The trim subtracts `max_messages - 1` from a Vec length: under 3 that
+    /// underflows a usize and panics mid-turn.
     #[test]
     fn max_messages_never_resolves_below_the_trim_floor() {
         let mut cfg = config("http://host/v1");
