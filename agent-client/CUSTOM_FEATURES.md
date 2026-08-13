@@ -65,6 +65,36 @@ input are drawn, and the camera follows the agent.
 
 ---
 
+## 2. Configurable OpenAI-compatible history cap
+
+**What**: `openai.max_messages` in `config.toml` sets how many messages of
+conversation history the OpenAI-compatible backend carries, system prompt
+included. It replaces a hardcoded `const MAX_MESSAGES: usize = 41`, and
+defaults to that same 41, so an unset config behaves exactly as before. The
+desktop app writes the key and exposes it as "Messages kept". Note this is the
+first Rust customization back on this branch after the 2026-07-30 drop below.
+
+**Lives in**: `agent-client/src/openai.rs` (`OpenAiConfig::max_messages`,
+`DEFAULT_MAX_MESSAGES`, `MIN_MAX_MESSAGES`, the clamp in `endpoint()`, and the
+trim in the invoker), `agent-client/src/openrouter.rs` (passes
+`DEFAULT_MAX_MESSAGES` when building its `Endpoint`).
+
+**Conflict resolution note**: `Endpoint` and the invoker are shared with
+OpenRouter, so if master restructures either, both constructors must keep
+setting `max_messages` — OpenRouter deliberately passes the default rather
+than growing a config key of its own, since only the OpenAI-compatible
+backend's context window is user-tunable. If master grows its own history cap,
+prefer master's and drop this entry. The floor is not optional: the trim
+computes `turn.len() - (max_messages - 1)` on a `usize`, so any path that lets
+a value below 3 reach it underflows and panics mid-turn.
+
+**Verify**: `cargo test -p agent-client openai` —
+`max_messages_never_resolves_below_the_trim_floor` covers the default, the
+clamp, and a passthrough value. Live signal: set `max_messages` low and grep
+the agent log for `trimmed conversation history to N messages`.
+
+---
+
 ## Superseded / intentionally dropped (do not re-add without checking master first)
 
 - **All agent-client (Rust) customizations** (2026-07-30) — dropped by
