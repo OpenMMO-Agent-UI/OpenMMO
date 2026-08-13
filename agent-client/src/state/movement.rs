@@ -1,5 +1,9 @@
 use super::*;
 
+/// Mirrors the server's `NO_SPAWN_MARGIN`: no monster spawns this close to a
+/// town, so a bot standing inside it never sees one.
+pub(crate) const TOWN_MARGIN: f32 = 30.0;
+
 /// A resolved `move` target.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MoveTarget {
