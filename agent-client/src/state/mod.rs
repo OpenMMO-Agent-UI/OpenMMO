@@ -123,6 +123,7 @@ mod world_state;
 pub use commands::ActionProgress;
 pub use events::EventUrgency;
 pub use inventory::{Carried, CarriedBagCopies};
+pub(crate) use movement::TOWN_MARGIN;
 pub use movement::{MoveTarget, MoveTargetError};
 pub use social::{PendingFriendRequest, PendingPartyInvite, PendingPartySummon, PushedTrade};
 pub use world_cache::WorldCache;
@@ -316,6 +317,16 @@ pub struct SharedState {
     pub monster_ai: MonsterAiManager,
     /// Pending commands from monster AI and spawn requests
     pending_commands: Vec<ClientMessage>,
+    /// Towns: the zones monsters may not spawn in, which is how a worker
+    /// finds town and knows to walk out of one. Fetched per terrain region
+    /// (see `fetch_no_spawn_zones_around`), not received on join — protocol
+    /// v37 deleted `ServerMessage::NoSpawnZones` along with the client-driven
+    /// spawn system, and a field nothing fills reads as "no towns anywhere",
+    /// which silently parks the fighter wherever it happens to stand.
+    pub no_spawn_zones: Vec<NoSpawnZone>,
+    /// Terrain regions whose zone file has already been fetched, so moving
+    /// around a town does not re-ask for it on every chunk crossing.
+    pub fetched_zone_regions: HashSet<(i32, i32)>,
     /// Spectator panel handle; feeds it chat/combat/system lines
     watch: Option<Arc<crate::watch::NpcWatch>>,
     /// Running follow loop: (target name, task handle). Anything that takes
