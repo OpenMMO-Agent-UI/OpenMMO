@@ -429,6 +429,7 @@ async fn state_snapshot(State(app): State<Arc<AppState>>, Query(q): Query<NpcQue
                 })
                 .collect()
         };
+        let (carried, capacity) = s.carry_load();
         let ground_items: Vec<serde_json::Value> = s
             .ground_items_in_sight()
             .into_iter()
@@ -454,6 +455,12 @@ async fn state_snapshot(State(app): State<Arc<AppState>>, Query(q): Query<NpcQue
             "dungeon_entrances": dungeon_entrances,
             "ground_items": ground_items,
             "bag": s.self_bag,
+            "weight": { "carried": carried, "capacity": capacity },
+            // The played character is the one the orchestrator entered with.
+            "attributes": s.characters.first().map(|c| &c.attributes),
+            "hunger": s.self_hunger.map(|(satiation, band)| json!({
+                "satiation": satiation, "band": band, "max": onlinerpg_shared::hunger::SATIATION_MAX,
+            })),
             "time": { "hour": s.game_hour, "minute": s.game_minute, "night": s.is_night },
             "players": s.nearby_players.values().collect::<Vec<_>>(),
             "monsters": s.nearby_monsters.values().collect::<Vec<_>>(),
