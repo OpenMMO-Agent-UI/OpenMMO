@@ -123,6 +123,7 @@ mod world_state;
 pub use commands::ActionProgress;
 pub use events::EventUrgency;
 pub use inventory::{Carried, CarriedBagCopies};
+pub(crate) use movement::TOWN_MARGIN;
 pub use movement::{MoveTarget, MoveTargetError};
 pub use social::{PendingFriendRequest, PendingPartyInvite, PendingPartySummon, PushedTrade};
 pub use world_cache::WorldCache;
@@ -305,8 +306,9 @@ pub struct SharedState {
     pub monster_ai: MonsterAiManager,
     /// Pending commands from monster AI and spawn requests
     pending_commands: Vec<ClientMessage>,
-    /// No-spawn zones received from server on join
-    no_spawn_zones: Vec<NoSpawnZone>,
+    /// No-spawn zones received from server on join. Towns are the zones
+    /// monsters may not spawn in, which is how a worker finds town.
+    pub no_spawn_zones: Vec<NoSpawnZone>,
     /// Spectator panel handle; feeds it chat/combat/system lines
     watch: Option<Arc<crate::watch::NpcWatch>>,
     /// Running follow loop: (target name, task handle). Anything that takes

@@ -100,6 +100,11 @@ pub struct NpcConfig {
     pub favor_file: Option<String>,
     /// Path to schedule file (time-based positioning).
     pub schedule_file: Option<String>,
+
+    /// Rule-based worker settings (`[npcs.worker]`). A `kind` other than
+    /// `none` replaces the LLM driver with a deterministic engine.
+    #[serde(default)]
+    pub worker: driver::WorkerConfig,
 }
 
 impl NpcConfig {
@@ -428,7 +433,10 @@ async fn run_npc_session(
     }
 
     let llm_enabled = npc.llm != LlmType::None;
-    let enter_char_id = if llm_enabled {
+    // A worker drives the character itself, so it needs the game entered
+    // even with no LLM configured.
+    let worker_enabled = npc.worker.kind != driver::WorkerKind::None;
+    let enter_char_id = if llm_enabled || worker_enabled {
         characters.first().map(|c| c.id)
     } else {
         None
@@ -527,17 +535,35 @@ async fn run_npc_session(
         }
     });
 
-    let llm_task = spawn_llm_task(npc, &state, &shared.scheduler, server_url, watch.clone());
+    let llm_task = if worker_enabled {
+        let cfg = npc.worker.clone();
+        let state = Arc::clone(&state);
+        let label = label.to_string();
+        let api_base_url = api_base_url(server_url);
+        let watch = watch.clone();
+        let instance_prompt = npc.instance_prompt.clone();
+        Some(tokio::spawn(async move {
+            driver::worker_driver(state, cfg, label, api_base_url, watch, instance_prompt).await;
+        }))
+    } else {
+        spawn_llm_task(npc, &state, &shared.scheduler, server_url, watch.clone())
+    };
 
-    // Monster AI tick task (1Hz)
+    // Monster AI tick task. Simulation rate only — the brain throttles its own
+    // network syncs to NETWORK_SYNC_INTERVAL_MS, so a finer tick costs packets
+    // nothing and buys the smooth chase the web client gets from ticking every
+    // animation frame. A whole second of run speed applied in one step made
+    // owned monsters jump ~4.5m at a time and swing a fifth less often.
     let state_for_ai = Arc::clone(&state);
     let trees_for_ai = Arc::clone(&shared.behavior_trees);
     let mapping_for_ai = Arc::clone(&shared.type_mapping);
     let movement_for_ai = Arc::clone(&shared.movement_speeds);
     let ai_task = tokio::spawn(async move {
-        let tick_interval = Duration::from_secs(1);
-        let mut interval = tokio::time::interval(tick_interval);
-        let delta_ms = 1000.0_f32;
+        let mut interval = tokio::time::interval(AI_TICK);
+        // A stall must not fire a burst of catch-up ticks; the real elapsed
+        // time below already accounts for it.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last = tokio::time::Instant::now();
 
         {
             let mut s = state_for_ai.lock().await;
@@ -548,6 +574,9 @@ async fn run_npc_session(
 
         loop {
             interval.tick().await;
+            let now = tokio::time::Instant::now();
+            let delta_ms = now.duration_since(last).as_secs_f32() * 1000.0;
+            last = now;
             let mut s = state_for_ai.lock().await;
             if !s.in_game {
                 continue;
@@ -560,11 +589,17 @@ async fn run_npc_session(
                 let wc = Arc::clone(&s.world_cache);
                 let world = wc.read().unwrap();
                 let SharedState {
+                    ref self_player,
                     ref nearby_players,
                     ref mut monster_ai,
                     ..
                 } = *s;
-                let cmds = monster_ai.tick_all(delta_ms, nearby_players, world.passability_cache());
+                let cmds = monster_ai.tick_all(
+                    delta_ms,
+                    self_player.as_ref(),
+                    nearby_players,
+                    world.passability_cache(),
+                );
                 drop(world);
                 let pending = s.drain_pending_commands();
                 (cmds, pending)
@@ -579,7 +614,9 @@ async fn run_npc_session(
         }
     });
 
-    if llm_enabled {
+    if worker_enabled {
+        info!("[{}] Running the {:?} worker", label, npc.worker.kind);
+    } else if llm_enabled {
         info!("[{}] Running in LLM-driven mode", label);
     } else {
         info!("[{}] Running in direct mode", label);
@@ -612,6 +649,11 @@ impl NpcConfig {
         }
     }
 }
+
+/// How often the monster brains are simulated. Fine enough that an owned
+/// monster chases and swings like one driven by a web client, which ticks its
+/// brains every animation frame; `monster_ai_tests` holds it to that.
+pub(crate) const AI_TICK: Duration = Duration::from_millis(50);
 
 /// Ceiling on stat rolls at character creation. A backstop against a prompt
 /// that never says yes — how picky to be is the agent's own business, and
