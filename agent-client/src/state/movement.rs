@@ -1,5 +1,9 @@
 use super::*;
 
+/// Mirrors the server's `NO_SPAWN_MARGIN`: no monster spawns this close to a
+/// town, so a bot standing inside it never sees one.
+pub(crate) const TOWN_MARGIN: f32 = 30.0;
+
 /// A resolved `move` target.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MoveTarget {
@@ -583,13 +587,9 @@ impl SharedState {
     }
 
     /// Pick a spawn position 20–25m around the bot's own player, rejecting
-    /// houses and no-spawn zones (+ margin). The async send path snaps Y to
-    /// terrain height before the spawn request is sent.
+    /// houses and no-spawn zones (+ [`TOWN_MARGIN`]). The async send path snaps
+    /// Y to terrain height before the spawn request is sent.
     pub(super) fn find_valid_spawn_position(&self) -> Option<Position> {
-        // Mirror the server's NO_SPAWN_MARGIN / client's TOWN_MARGIN so the bot
-        // doesn't generate spawn requests the server will reject around towns.
-        const TOWN_MARGIN: f32 = 30.0;
-
         let center = self.self_player.as_ref()?.position;
 
         // Don't spawn around a bot that is standing in (or near) a town.

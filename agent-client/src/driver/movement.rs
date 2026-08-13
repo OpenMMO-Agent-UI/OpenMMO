@@ -34,7 +34,14 @@ pub(super) fn travel_ms(step_dist: f32, sprinting: bool, move_mult: f32) -> u64 
 
 /// Maximum distance per move step (units). Longer segments are subdivided
 /// so the NPC walks at MOVE_SPEED instead of teleporting.
-pub(super) const MAX_STEP_DIST: f32 = 3.0;
+///
+/// Must stay above the client's walk/jog cutoff (`getMovementMode` in
+/// `client/src/lib/utils/movementUtils.ts` walks anything `<= 3`). A step from
+/// standstill is the whole distance a watching client is given, so subdividing
+/// at the cutoff itself opened every journey with ~0.8s of walk animation under
+/// a body already gliding at jog speed — the skating a human never shows,
+/// because their client sends the smoothed waypoint whole.
+pub(super) const MAX_STEP_DIST: f32 = 4.0;
 const SCHEDULE_ARRIVAL_RADIUS: f32 = 2.0;
 
 /// How many shut doors one move may open on its way to the goal. A floor
