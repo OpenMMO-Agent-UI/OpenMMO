@@ -28,6 +28,8 @@ fn bag(s: &mut SharedState, def_id: &str, quantity: u32) {
         item_def_id: def_id.to_string(),
         quantity,
         enchant: 0,
+        cape_color: None,
+        cape_texture: None,
     });
 }
 
@@ -48,6 +50,7 @@ fn monster(id: &str, kind: &str, x: f32, z: f32) -> Monster {
         last_attack_at: 0,
         last_move_at: 0,
         move_budget: 0.0,
+        owner_since: 0,
     }
 }
 
@@ -494,6 +497,9 @@ fn every_step_renders_the_action_json_the_executor_parses() {
     ] {
         let action = step.action().expect("an action");
         assert_eq!(action["type"], kind);
+        if kind == "move" {
+            assert_eq!(action["sprint"], json!(true));
+        }
         let turn = json!({ "actions": [action] }).to_string();
         assert!(
             super::super::action::parse_turn_tolerant(&turn)

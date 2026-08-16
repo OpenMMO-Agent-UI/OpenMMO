@@ -117,7 +117,8 @@ impl Step {
             Step::Drop(item) => json!({"type": "drop", "item": item, "qty": "all"}),
             Step::Buy(item) => json!({"type": "buy", "item": item}),
             Step::Fish { x, z } => json!({"type": "fish", "x": x, "z": z}),
-            Step::Walk { x, z } => json!({"type": "move", "x": x, "z": z}),
+            // Always sprint: the hunger gate is the only governor a worker needs.
+            Step::Walk { x, z } => json!({"type": "move", "x": x, "z": z, "sprint": true}),
             Step::Idle => return None,
         })
     }
@@ -471,7 +472,9 @@ pub async fn worker_driver(
                         target_last_seen.get_or_insert(p);
                     }
                 }
-                attack_target = tick_combat(&state, target).await;
+                if !tick_combat(&state, &target, Some(true)).await {
+                    attack_target = None;
+                }
                 last_attack_at = Instant::now();
                 if attack_target.is_none() {
                     loot_at = target_last_seen.take().map(|p| (p, 0));
@@ -754,7 +757,9 @@ async fn run(
     if steps.iter().all(|s| *s == Step::Idle) {
         return None;
     }
-    handle_response(state, &turn, &None, &None, false).await
+    handle_response(state, &turn, &None, &None, false)
+        .await
+        .map(|(id, _)| id)
 }
 
 #[cfg(test)]

@@ -23,6 +23,7 @@ pub(super) enum AgentAction {
         )]
         monster_id: String,
         /// Unset = the agent's `always_sprint` default; false walks instead.
+        #[serde(default)]
         sprint: Option<bool>,
     },
     #[serde(rename = "move")]
@@ -45,6 +46,7 @@ pub(super) enum AgentAction {
         #[serde(alias = "dungeon_depth", alias = "floor", alias = "floor_level")]
         depth: Option<i32>,
         /// Unset = the agent's `always_sprint` default; false walks instead.
+        #[serde(default)]
         sprint: Option<bool>,
     },
     /// Keep following a character: re-approach whenever they move, until the
@@ -55,6 +57,7 @@ pub(super) enum AgentAction {
         target: String,
         /// Unset walks the catch-ups (the target sets the pace anyway);
         /// true sprints them.
+        #[serde(default)]
         sprint: Option<bool>,
     },
     #[serde(rename = "respawn")]
@@ -216,6 +219,7 @@ pub(super) enum AgentAction {
         )]
         item: PickupRef,
         /// Unset = the agent's `always_sprint` default; false walks instead.
+        #[serde(default)]
         sprint: Option<bool>,
     },
     /// Sell one or more units of a bag item to a nearby merchant, walking up
@@ -237,6 +241,7 @@ pub(super) enum AgentAction {
         #[serde(default, alias = "amount", alias = "count")]
         qty: Option<Qty>,
         /// Unset = the agent's `always_sprint` default; false walks instead.
+        #[serde(default)]
         sprint: Option<bool>,
     },
     /// Buy one catalog item from a nearby merchant, walking up to them
@@ -254,6 +259,7 @@ pub(super) enum AgentAction {
         )]
         merchant: Option<String>,
         /// Unset = the agent's `always_sprint` default; false walks instead.
+        #[serde(default)]
         sprint: Option<bool>,
     },
     /// Drop one or more units of a bag item on the ground where you stand.
@@ -287,6 +293,7 @@ pub(super) enum AgentAction {
         )]
         merchant: Option<String>,
         /// Unset = the agent's `always_sprint` default; false walks instead.
+        #[serde(default)]
         sprint: Option<bool>,
     },
     /// Smash a breakable dungeon prop (barrel/crate) on the current floor,
@@ -296,6 +303,7 @@ pub(super) enum AgentAction {
         #[serde(alias = "id", alias = "prop", alias = "target")]
         prop_id: u32,
         /// Unset = the agent's `always_sprint` default; false walks instead.
+        #[serde(default)]
         sprint: Option<bool>,
     },
     /// Open a chest standing in the agent's own room: the nearest one, or the
@@ -307,6 +315,7 @@ pub(super) enum AgentAction {
         #[serde(default, alias = "target", alias = "which", alias = "name")]
         chest: Option<String>,
         /// Unset = the agent's `always_sprint` default; false walks instead.
+        #[serde(default)]
         sprint: Option<bool>,
     },
     /// Reroll starting stats. Only meaningful during character creation,
@@ -1301,8 +1310,9 @@ mod tests {
         turn.actions.into_iter().next().unwrap()
     }
 
-    /// "Unset" must stay distinguishable from `false`: only the former takes
-    /// the agent's default.
+    /// Every walking action carries the sprint opt-out, and "unset" has to
+    /// stay distinguishable from `false` — the default only applies to the
+    /// former.
     #[test]
     fn the_sprint_opt_out_parses_on_every_walking_action() {
         let sprint_of = |json: &str| match parse_single_action(json) {

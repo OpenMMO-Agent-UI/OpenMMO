@@ -47,6 +47,8 @@ fn fight(delta_ms: f32, seconds: f32) -> (usize, f32) {
     let mut prev = p(10.0, 0.0, 10.0);
     for _ in 0..(seconds * 1000.0 / delta_ms) as usize {
         let world = cache.read().unwrap();
+        let self_pass_floor =
+            onlinerpg_shared::dungeon::passability_floor_for_level(s.self_floor_level);
         let SharedState {
             ref self_player,
             ref nearby_players,
@@ -55,8 +57,9 @@ fn fight(delta_ms: f32, seconds: f32) -> (usize, f32) {
         } = s;
         for cmd in monster_ai.tick_all(
             delta_ms,
-            self_player.as_ref(),
             nearby_players,
+            self_player.as_ref(),
+            self_pass_floor,
             world.passability_cache(),
         ) {
             match cmd {
