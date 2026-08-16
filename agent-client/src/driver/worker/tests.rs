@@ -494,6 +494,9 @@ fn every_step_renders_the_action_json_the_executor_parses() {
     ] {
         let action = step.action().expect("an action");
         assert_eq!(action["type"], kind);
+        if kind == "move" {
+            assert_eq!(action["sprint"], json!(true));
+        }
         let turn = json!({ "actions": [action] }).to_string();
         assert!(
             super::super::action::parse_turn_tolerant(&turn)
