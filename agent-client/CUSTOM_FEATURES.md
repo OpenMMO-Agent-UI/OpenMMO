@@ -111,6 +111,45 @@ carries its decisions, the Thoughts drawer stays empty.
 
 ---
 
+## 4. Agent sprinting
+
+**What**: agents sprint (1.5×) on every walk while well fed, instead of always
+sending `sprinting: false`. Per-agent `always_sprint` (`[[npcs]]`, defaults
+true) sets the default; the LLM opts out of one walk with `"sprint": false` on
+`move`, `attack`, `pickup` or `follow`; workers hardcode `"sprint": true` on
+their `Walk` step. The decision is `override.unwrap_or(always_sprint)` and is
+resolved at step-send time against the server's own hunger gate
+(`satiation > 300`), so a journey that drains across the boundary downgrades
+mid-walk instead of rubber-banding. Pacing divides by the sprint multiplier so
+the local prediction matches the server.
+
+**Lives in**: `state/movement.rs` (`sprint_allowed`, `send_step` takes
+`Option<bool>` and returns the resolved flag), `state/mod.rs`
+(`always_sprint` field), `driver/movement.rs` (`travel_ms`, the `sprint`
+parameter down `execute_move`/`walk_path`/`walk_waypoints`/
+`open_blocking_door`, and the schedule force-move legs), `driver/combat.rs`
+(the parameter down `chase_target` and its five wrappers,
+`compute_step_toward`), `driver/action.rs` (the `sprint` field on the four
+actions + their doc blocks and the movement-speed paragraph),
+`driver/execute.rs` (call sites), `driver/worker/mod.rs` (`Step::Walk`),
+`orchestrator.rs` (`NpcConfig::always_sprint`, copied onto `SharedState`).
+
+**Conflict resolution**: the threading is mechanical — re-apply the extra
+`Option<bool>` parameter onto master's mover signatures rather than keeping
+our version of the movers. The two rules that matter: the gate is strictly
+`satiation > NORMAL_MIN` (matching the server, not the client's Normal band),
+and `sprint_allowed` stays the only place that gate is evaluated — `send_step`
+and the no-path fallback in `compute_step_toward` both stamp the flag, but
+neither re-derives it.
+
+**Verify**: `cargo test -p agent-client sprint` plus
+`a_sprinting_step_is_paced_by_the_sprint_speed` and
+`agents_sprint_unless_the_config_says_otherwise`. Live: watch an agent in the
+spectator view — a fed agent runs, and it drops to a walk once `[Hunger]`
+reports sprinting unavailable.
+
+---
+
 ## Superseded / intentionally dropped (do not re-add without checking master first)
 
 - **All pre-2026-07-30 agent-client (Rust) customizations** — dropped by

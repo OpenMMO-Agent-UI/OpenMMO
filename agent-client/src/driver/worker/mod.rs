@@ -107,7 +107,8 @@ impl Step {
             Step::Drop(item) => json!({"type": "drop", "item": item, "qty": "all"}),
             Step::Buy(item) => json!({"type": "buy", "item": item}),
             Step::Fish { x, z } => json!({"type": "fish", "x": x, "z": z}),
-            Step::Walk { x, z } => json!({"type": "move", "x": x, "z": z}),
+            // Always sprint: the hunger gate is the only governor a worker needs.
+            Step::Walk { x, z } => json!({"type": "move", "x": x, "z": z, "sprint": true}),
             Step::Idle => return None,
         })
     }
