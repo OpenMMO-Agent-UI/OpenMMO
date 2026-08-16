@@ -71,6 +71,10 @@ pub struct NpcConfig {
     /// default to off: they run on the operator's budget, and an NPC nobody
     /// can see has no one to act for. See `always_active()`.
     pub always_active: Option<bool>,
+    /// Sprint on every walk while well fed. Off makes the agent walk
+    /// everywhere, which costs it far less satiation.
+    #[serde(default = "default_always_sprint")]
+    pub always_sprint: bool,
     #[serde(default)]
     pub claude: ClaudeConfig,
     #[serde(default)]
@@ -105,6 +109,10 @@ pub struct NpcConfig {
     /// `none` replaces the LLM driver with a deterministic engine.
     #[serde(default)]
     pub worker: driver::WorkerConfig,
+}
+
+fn default_always_sprint() -> bool {
+    true
 }
 
 impl NpcConfig {
@@ -464,6 +472,7 @@ async fn run_npc_session(
     )));
     {
         let mut s = state.lock().await;
+        s.always_sprint = npc.always_sprint;
         s.plays_music = npc.plays_music();
         s.keepsake_ids = npc
             .id
