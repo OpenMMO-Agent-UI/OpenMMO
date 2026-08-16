@@ -215,6 +215,10 @@ pub struct SharedState {
     /// Items lying on the ground, keyed by instance id (from the join
     /// snapshot plus GroundItemSpawned/Appeared/Removed).
     ground_items: HashMap<u64, GroundItem>,
+    /// Sprint on every walk unless the action opts out, from
+    /// `NpcConfig::always_sprint`. The hunger gate still applies —
+    /// see [`Self::sprint_allowed`].
+    pub always_sprint: bool,
     /// Whether this agent busks, from `NpcConfig::plays_music` — the same
     /// gate that put the songbook and tip rules into its prompt, so it is
     /// never instructed about tips it will not receive.
@@ -357,6 +361,7 @@ impl SharedState {
             merchant_buyback: HashMap::new(),
             nearby_monsters: HashMap::new(),
             ground_items: HashMap::new(),
+            always_sprint: true,
             plays_music: false,
             keepsake_ids: Vec::new(),
             events: Vec::new(),
