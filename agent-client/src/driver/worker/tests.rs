@@ -161,8 +161,14 @@ fn a_worker_keeps_items_it_was_not_labeled_to_sell() {
     bag(&mut s, "old_boot", 1);
     let empty = labels::BagLabels::default();
 
-    assert!(sell_list(&s, &empty).is_empty(), "nothing marked, nothing sold");
-    assert!(junk_list(&s, &empty).is_empty(), "nothing marked, nothing dropped");
+    assert!(
+        sell_list(&s, &empty).is_empty(),
+        "nothing marked, nothing sold"
+    );
+    assert!(
+        junk_list(&s, &empty).is_empty(),
+        "nothing marked, nothing dropped"
+    );
 }
 
 /// The trip only helps when the shop can help. Starving with nothing to eat
@@ -198,7 +204,10 @@ fn only_real_junk_is_dropped() {
     };
 
     assert_eq!(junk_list(&s, &labels), vec!["clump_of_kelp".to_string()]);
-    assert!(sell_list(&s, &labels).is_empty(), "none of these has a price");
+    assert!(
+        sell_list(&s, &labels).is_empty(),
+        "none of these has a price"
+    );
 }
 
 #[test]

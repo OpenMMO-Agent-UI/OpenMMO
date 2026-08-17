@@ -72,6 +72,9 @@ mod tests {
     #[test]
     fn a_missing_file_reads_as_no_labels() {
         assert_eq!(labels_from_prompt(None), BagLabels::default());
-        assert_eq!(labels_from_prompt(Some("no/such/file.txt")), BagLabels::default());
+        assert_eq!(
+            labels_from_prompt(Some("no/such/file.txt")),
+            BagLabels::default()
+        );
     }
 }

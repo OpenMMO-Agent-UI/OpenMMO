@@ -16,14 +16,17 @@ function sourceFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
     const path = join(dir, name)
     if (statSync(path).isDirectory()) return sourceFiles(path)
-    return /\.(ts|svelte)$/.test(name) && !name.endsWith('.test.ts') ? [path] : []
+    return /\.(ts|svelte)$/.test(name) && !name.endsWith('.test.ts')
+      ? [path]
+      : []
   })
 }
 
 describe('monster ownership', () => {
   it('is never decided by comparing raw ids', () => {
     // `ownerId`/`owner_id` weighed against a current-player id on the same line.
-    const rawCompare = /owner_?[iI]d\s*[!=]==?[^=]*currentPlayer|currentPlayer[^\n]*?[!=]==?\s*[^\n]*owner_?[iI]d/
+    const rawCompare =
+      /owner_?[iI]d\s*[!=]==?[^=]*currentPlayer|currentPlayer[^\n]*?[!=]==?\s*[^\n]*owner_?[iI]d/
 
     const offenders = sourceFiles(SRC)
       .filter((path) => !path.endsWith('observerStore.ts'))

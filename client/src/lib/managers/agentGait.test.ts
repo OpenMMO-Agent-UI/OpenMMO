@@ -66,7 +66,12 @@ function render(wire: Wire[], seconds: number) {
     }
     if (!movement) continue
 
-    const r = calculateMovementStep(pos, movement, DEFAULT_MOVEMENT_CONFIG, FRAME)
+    const r = calculateMovementStep(
+      pos,
+      movement,
+      DEFAULT_MOVEMENT_CONFIG,
+      FRAME
+    )
     movement.currentSpeed = r.newSpeed
     pos = r.newPos
     frames.push(r.arrived ? 'idle' : getMovementMode(movement.totalDistance))
@@ -91,7 +96,9 @@ describe('agent gait', () => {
   })
 
   it('still walks a short hop, exactly as a human clicking two metres away', () => {
-    expect(render(agentStream(2), 4).legs).toEqual(render(humanStream(2), 4).legs)
+    expect(render(agentStream(2), 4).legs).toEqual(
+      render(humanStream(2), 4).legs
+    )
     expect(render(agentStream(2), 4).legs).toContain('walk')
   })
 })

@@ -616,7 +616,11 @@ const TOWN_VISIT_DELAY: Duration = Duration::from_secs(60);
 /// Everything the town trip does in one turn: sell the marked loot, drop the
 /// marked junk, restock, eat.
 /// Empty when the shop has nothing to offer this trip.
-pub(crate) fn town_business(s: &SharedState, cfg: &WorkerConfig, labels: &labels::BagLabels) -> Vec<Step> {
+pub(crate) fn town_business(
+    s: &SharedState,
+    cfg: &WorkerConfig,
+    labels: &labels::BagLabels,
+) -> Vec<Step> {
     let mut steps: Vec<Step> = Vec::new();
     for id in sell_list(s, labels) {
         steps.push(Step::Sell(id));
