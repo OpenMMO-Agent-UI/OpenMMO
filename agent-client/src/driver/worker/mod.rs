@@ -9,6 +9,7 @@
 
 mod fighter;
 mod fisher;
+mod labels;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -179,13 +180,15 @@ pub(crate) fn should_eat(s: &SharedState) -> Option<String> {
         .map(|i| i.item_def_id.clone())
 }
 
-/// Everything in the bag a merchant pays for.
-pub(crate) fn sell_list(s: &SharedState) -> Vec<String> {
+/// Everything in the bag a merchant pays for. When the app has marked items
+/// with the sell label, only those are sold — a fighter keeps everything it
+/// did not get the ok to sell.
+pub(crate) fn sell_list(s: &SharedState, labels: &labels::BagLabels) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
     for item in &s.self_bag {
         let id = &item.item_def_id;
         let sellable = crate::item_defs::get(id).is_some_and(|d| d.base_price.unwrap_or(0) > 0);
-        if sellable && !is_keeper(id) && !ids.contains(id) {
+        if sellable && !is_keeper(id) && !ids.contains(id) && labels.sellable.contains(id) {
             ids.push(id.clone());
         }
     }
@@ -194,12 +197,13 @@ pub(crate) fn sell_list(s: &SharedState) -> Vec<String> {
 
 /// Dead weight, dropped in town. Only what the game itself calls junk: plenty
 /// of unpriced items are worth carrying (a coin pouch pays out when used, a
-/// worn starting weapon is the one you are holding).
-pub(crate) fn junk_list(s: &SharedState) -> Vec<String> {
+/// worn starting weapon is the one you are holding). When the app has marked
+/// items with the drop label, only those are dropped.
+pub(crate) fn junk_list(s: &SharedState, labels: &labels::BagLabels) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
     for item in &s.self_bag {
         let id = &item.item_def_id;
-        if category(id) == Some("junk") && !ids.contains(id) {
+        if category(id) == Some("junk") && !ids.contains(id) && labels.dropable.contains(id) {
             ids.push(id.clone());
         }
     }
@@ -320,6 +324,7 @@ pub async fn worker_driver(
     label: String,
     api_base_url: String,
     watch: Option<Arc<crate::watch::NpcWatch>>,
+    instance_prompt: Option<String>,
 ) {
     while !state.lock().await.in_game {
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -357,6 +362,9 @@ pub async fn worker_driver(
     // The last turn mirrored to the spectator feed, so a repeated decision is
     // reported once instead of twice a second.
     let mut last_turn = String::new();
+    // Re-read the app's sell/drop marks on every trip so a label change while
+    // the worker runs is picked up without a restart.
+    let mut labels = labels::labels_from_prompt(instance_prompt.as_deref());
 
     loop {
         refresh_world_data(&state, &mut world_data_at, &api_base_url, &label).await;
@@ -431,6 +439,11 @@ pub async fn worker_driver(
             continue;
         }
 
+        // Re-read the sell/drop marks while on a town errand, so a label
+        // change made while the worker runs is picked up on this trip.
+        if errand != Errand::Work {
+            labels = labels::labels_from_prompt(instance_prompt.as_deref());
+        }
         let step = next_step(
             &state,
             &cfg,
@@ -438,6 +451,7 @@ pub async fn worker_driver(
             &mut loot_at,
             &mut town_blocked_until,
             &label,
+            &labels,
         )
         .await;
         if let Some(target) = run(&state, step, &watch, &mut last_turn).await {
@@ -510,6 +524,7 @@ async fn next_step(
     loot_at: &mut Option<(Position, u32)>,
     town_blocked_until: &mut Option<Instant>,
     label: &str,
+    labels: &labels::BagLabels,
 ) -> Vec<Step> {
     let s = state.lock().await;
     let waiting_out_a_failed_trip = town_blocked_until.is_some_and(|t| Instant::now() < t);
@@ -526,7 +541,7 @@ async fn next_step(
         // last stretch themselves.
         if s.nearest_merchant().is_some() {
             *errand = Errand::Work;
-            let business = town_business(&s, cfg);
+            let business = town_business(&s, cfg, labels);
             if business.is_empty() {
                 // Nothing the shop can fix — starving with no gold for food,
                 // say. Coming straight back would be an endless commute.
@@ -598,14 +613,15 @@ const TOWN_RETRY_DELAY: Duration = Duration::from_secs(300);
 /// Breathing room after a trip that did do business.
 const TOWN_VISIT_DELAY: Duration = Duration::from_secs(60);
 
-/// Everything the town trip does in one turn: empty the bag, restock, eat.
+/// Everything the town trip does in one turn: sell the marked loot, drop the
+/// marked junk, restock, eat.
 /// Empty when the shop has nothing to offer this trip.
-pub(crate) fn town_business(s: &SharedState, cfg: &WorkerConfig) -> Vec<Step> {
+pub(crate) fn town_business(s: &SharedState, cfg: &WorkerConfig, labels: &labels::BagLabels) -> Vec<Step> {
     let mut steps: Vec<Step> = Vec::new();
-    for id in sell_list(s) {
+    for id in sell_list(s, labels) {
         steps.push(Step::Sell(id));
     }
-    for id in junk_list(s) {
+    for id in junk_list(s, labels) {
         steps.push(Step::Drop(id));
     }
     for _ in 0..potions_to_buy(s, cfg) {

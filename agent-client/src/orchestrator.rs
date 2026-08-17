@@ -550,8 +550,9 @@ async fn run_npc_session(
         let label = label.to_string();
         let api_base_url = api_base_url(server_url);
         let watch = watch.clone();
+        let instance_prompt = npc.instance_prompt.clone();
         Some(tokio::spawn(async move {
-            driver::worker_driver(state, cfg, label, api_base_url, watch).await;
+            driver::worker_driver(state, cfg, label, api_base_url, watch, instance_prompt).await;
         }))
     } else {
         spawn_llm_task(npc, &state, &shared.scheduler, server_url, watch.clone())

@@ -83,9 +83,15 @@ pathfinding, looting, trading and the spectator mirror are all reused as-is.
 Turns are mirrored to the watch feed under the kind `worker`, which is what
 keeps the desktop app's action captions working with no model in the loop.
 
+Workers respect the desktop app's bag labels: the sell/drop marks written
+into the character's `instance.txt` under the `<!-- BAG LABELS -->` block are
+re-read on every town errand, and only marked loot is sold / marked junk is
+dropped. Unmarked items stay in the bag, so a worker never dumps a full bag
+the player did not get the ok to sell (`labels.rs` parses the block).
+
 **Lives in**: `agent-client/src/driver/worker/` (`mod.rs` the loop and the
-shared survival/town decisions, plus `fighter.rs`, `fisher.rs`, `tests.rs`)
-— self-contained. Five touch points outside it:
+shared survival/town decisions, plus `fighter.rs`, `fisher.rs`, `labels.rs`,
+`tests.rs`) — self-contained. Five touch points outside it:
 `driver/mod.rs` (`mod worker;` + the `pub use`), `orchestrator.rs`
 (`NpcConfig::worker`, entering the game when a worker is configured, spawning
 `worker_driver` in place of the LLM task, the mode log line), `state/mod.rs`
@@ -101,13 +107,15 @@ rules onto it. `handle_response`, `tick_combat`, `respawn_due`,
 `request_respawn` and `decline_lapsed_trade` are reached through `super::`,
 so a rename upstream is a compile error here, never silent drift.
 
-**Verify**: `cargo test -p agent-client worker` (21 tests: eligibility,
+**Verify**: `cargo test -p agent-client worker` (25 tests: eligibility,
 approach, potion/scroll/eat/town-trip decisions, loot radius, water
-selection, and that every emitted step parses as an action). App side:
-`npm test` covers the `[npcs.worker]` config generation and the LLM-validation
-skip. Live: pick a worker under Settings → Behaviour → Automatic play, hit
-**Apply & restart**, and watch it grind in the spectator view — the Log drawer
-carries its decisions, the Thoughts drawer stays empty.
+selection, label parsing and that every emitted step parses as an action).
+App side: `npm test` covers the `[npcs.worker]` config generation and the
+LLM-validation skip. Live: pick a worker under Settings → Behaviour →
+Automatic play, hit **Apply & restart**, and watch it grind in the spectator
+view — the Log drawer carries its decisions, the Thoughts drawer stays
+empty. Mark items in the Bag drawer, Apply labels, and the next town trip
+sells only those.
 
 ---
 

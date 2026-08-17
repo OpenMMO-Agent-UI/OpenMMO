@@ -127,15 +127,19 @@ fn starving_with_no_food_is_a_town_trip_too() {
 }
 
 #[test]
-fn the_town_trip_sells_loot_drops_junk_and_keeps_the_kit() {
+fn the_town_trip_sells_marked_loot_drops_marked_junk_and_keeps_the_kit() {
     let mut s = state_at(0.0, 0.0);
     bag(&mut s, "gold_ring", 1);
     bag(&mut s, "old_boot", 1);
     bag(&mut s, HEALING_POTION, 3);
     bag(&mut s, "apple", 1);
+    let labels = labels::BagLabels {
+        sellable: vec!["gold_ring".into()],
+        dropable: vec!["old_boot".into()],
+    };
 
-    assert_eq!(sell_list(&s), vec!["gold_ring".to_string()]);
-    assert_eq!(junk_list(&s), vec!["old_boot".to_string()]);
+    assert_eq!(sell_list(&s, &labels), vec!["gold_ring".to_string()]);
+    assert_eq!(junk_list(&s, &labels), vec!["old_boot".to_string()]);
     assert_eq!(potions_to_buy(&s, &cfg()), cfg().potion_stock - 3);
 
     // A purse that covers two potions orders two, not a refused ten.
@@ -148,6 +152,19 @@ fn the_town_trip_sells_loot_drops_junk_and_keeps_the_kit() {
     assert_eq!(potions_to_buy(&s, &cfg()), 0);
 }
 
+/// Unmarked loot stays in the bag: the app's sell label is what a worker may
+/// sell, so a bag of unlabelled drops survives the town trip untouched.
+#[test]
+fn a_worker_keeps_items_it_was_not_labeled_to_sell() {
+    let mut s = state_at(0.0, 0.0);
+    bag(&mut s, "gold_ring", 1);
+    bag(&mut s, "old_boot", 1);
+    let empty = labels::BagLabels::default();
+
+    assert!(sell_list(&s, &empty).is_empty(), "nothing marked, nothing sold");
+    assert!(junk_list(&s, &empty).is_empty(), "nothing marked, nothing dropped");
+}
+
 /// The trip only helps when the shop can help. Starving with nothing to eat
 /// and nothing to sell, "go to town" would otherwise repeat forever.
 #[test]
@@ -155,13 +172,15 @@ fn a_town_trip_with_nothing_to_do_asks_for_nothing() {
     let mut s = state_at(0.0, 0.0);
     s.self_hunger = Some((10, HungerState::Weak));
     s.self_gold = Some(0);
+    let labels = labels::BagLabels::default();
     assert!(should_town_trip(&s, &cfg()));
-    assert_eq!(town_business(&s, &cfg()), Vec::new());
+    assert_eq!(town_business(&s, &cfg(), &labels), Vec::new());
 
     bag(&mut s, "old_boot", 1);
     assert_eq!(
-        town_business(&s, &cfg()),
-        vec![Step::Drop("old_boot".into())]
+        town_business(&s, &cfg(), &labels),
+        Vec::new(),
+        "unmarked junk is kept, so the shop has nothing to fix"
     );
 }
 
@@ -173,9 +192,13 @@ fn only_real_junk_is_dropped() {
     bag(&mut s, "sunken_coin_pouch", 1);
     bag(&mut s, "worn_iron_sword", 1);
     bag(&mut s, "clump_of_kelp", 2);
+    let labels = labels::BagLabels {
+        sellable: vec!["worn_iron_sword".into()],
+        dropable: vec!["clump_of_kelp".into()],
+    };
 
-    assert_eq!(junk_list(&s), vec!["clump_of_kelp".to_string()]);
-    assert!(sell_list(&s).is_empty(), "none of these has a price");
+    assert_eq!(junk_list(&s, &labels), vec!["clump_of_kelp".to_string()]);
+    assert!(sell_list(&s, &labels).is_empty(), "none of these has a price");
 }
 
 #[test]
