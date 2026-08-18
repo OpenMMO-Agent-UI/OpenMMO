@@ -880,7 +880,7 @@ async fn a_merchant_across_town_is_found_instead_of_written_off() {
         NoSpawnZone {
             min_x: -1447.023,
             max_x: -1439.604,
-            min_z: 4770.360,
+            min_z: 4770.36,
             max_z: 4774.627,
         },
     ];
