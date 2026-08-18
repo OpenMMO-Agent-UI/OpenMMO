@@ -560,6 +560,7 @@ async fn self_rescue(
     should_eat(&s).map(|food| vec![Step::Use(food)])
 }
 
+#[allow(clippy::too_many_arguments)] // one call site; a params struct would just relocate the noise
 async fn next_step(
     state: &Arc<Mutex<SharedState>>,
     cfg: &WorkerConfig,
