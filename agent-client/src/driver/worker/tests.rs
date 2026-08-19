@@ -28,6 +28,8 @@ fn bag(s: &mut SharedState, def_id: &str, quantity: u32) {
         item_def_id: def_id.to_string(),
         quantity,
         enchant: 0,
+        cape_color: None,
+        cape_texture: None,
     });
 }
 
