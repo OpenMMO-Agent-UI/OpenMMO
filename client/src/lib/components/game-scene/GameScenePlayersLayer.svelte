@@ -43,7 +43,10 @@
   } from '../../terrain/world-wrap'
   import { OFFSCREEN_Y } from '../../utils/house-geo-utils'
   import { torchLightEnabled } from '../../stores/debugStore'
-  import { localTorchEquipped } from '../../stores/inventoryStore'
+  import {
+    localTorchEquipped,
+    shieldGlowLit,
+  } from '../../stores/inventoryStore'
 
   const TORCH_OFFSET = new THREE.Vector3(
     TORCH_BASE_POSITION.x,
@@ -193,9 +196,10 @@
   })
 
   // Unified torch: exactly one PointLight for the entire scene.
-  // Priority: local player's torch (if ON) > closest visible remote player
-  // with torchOn. When no candidate, intensity drops to 0. Keeping the
-  // PointLight count at a constant 1 avoids WebGPU pipeline recompile stalls.
+  // Priority: local player's torch or night-lit shield (if ON) > closest
+  // visible remote player with torchOn. When no candidate, intensity drops to
+  // 0. Keeping the PointLight count at a constant 1 avoids WebGPU pipeline
+  // recompile stalls.
   //
   // Position/intensity are driven imperatively from the game loop (not a
   // $derived) because currentPlayer.position is a mutated plain object that
@@ -316,7 +320,11 @@
         scale: CAMPFIRE_INTENSITY_SCALE,
       }
     }
-    if (get(localTorchEquipped) || get(torchLightEnabled)) {
+    if (
+      get(localTorchEquipped) ||
+      get(torchLightEnabled) ||
+      get(shieldGlowLit)
+    ) {
       const p = currentPlayer.position
       return {
         target: setTorchTargetFromPose(p.x, p.z, p.y, currentPlayer.rotation),
