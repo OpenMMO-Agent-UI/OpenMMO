@@ -50,6 +50,7 @@ fn monster(id: &str, kind: &str, x: f32, z: f32) -> Monster {
         last_attack_at: 0,
         last_move_at: 0,
         move_budget: 0.0,
+        owner_since: 0,
     }
 }
 

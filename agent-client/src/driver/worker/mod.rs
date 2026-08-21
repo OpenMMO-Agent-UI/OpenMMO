@@ -472,7 +472,9 @@ pub async fn worker_driver(
                         target_last_seen.get_or_insert(p);
                     }
                 }
-                attack_target = tick_combat(&state, target).await;
+                // Always sprint: the hunger gate is the only governor a worker needs.
+                let keep_fighting = tick_combat(&state, &target, Some(true)).await;
+                attack_target = keep_fighting.then_some(target);
                 last_attack_at = Instant::now();
                 if attack_target.is_none() {
                     loot_at = target_last_seen.take().map(|p| (p, 0));
@@ -756,7 +758,9 @@ async fn run(
     if steps.iter().all(|s| *s == Step::Idle) {
         return None;
     }
-    handle_response(state, &turn, &None, &None, false).await
+    handle_response(state, &turn, &None, &None, false)
+        .await
+        .map(|(monster_id, _)| monster_id)
 }
 
 #[cfg(test)]

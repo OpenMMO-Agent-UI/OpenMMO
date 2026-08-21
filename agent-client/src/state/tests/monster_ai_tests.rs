@@ -45,7 +45,8 @@ fn fight(delta_ms: f32, seconds: f32) -> (usize, f32) {
     let mut attacks = 0;
     let mut max_step = 0.0f32;
     let mut prev = p(10.0, 0.0, 10.0);
-    let self_pass_floor = onlinerpg_shared::dungeon::passability_floor_for_level(s.self_floor_level);
+    let self_pass_floor =
+        onlinerpg_shared::dungeon::passability_floor_for_level(s.self_floor_level);
     for _ in 0..(seconds * 1000.0 / delta_ms) as usize {
         let world = cache.read().unwrap();
         let SharedState {
