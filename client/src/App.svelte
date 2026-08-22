@@ -12,6 +12,7 @@
   import { gameStore } from './lib/stores/gameStore'
   import { isObserver } from './lib/stores/observerStore'
   import { decodeManualBootstrap } from './lib/stores/manualBootstrap'
+  import { spectatorHasEnteredWorld } from './lib/stores/spectatorReadiness'
   import { createWebGPURenderer } from './lib/utils/renderer'
   import {
     networkManager,
@@ -59,7 +60,7 @@
   let observerWaiting = $derived(
     (isObserver || manualBootstrap !== null) &&
       !observerError &&
-      !currentPlayerHp
+      !spectatorHasEnteredWorld(currentPlayerHp)
   )
   /// Normal play only reaches the game screen after JoinSuccess, so the scene
   /// mounts knowing where it is. A spectator opens straight onto 'game', and
@@ -67,7 +68,7 @@
   /// once the real position arrives — keeps frame times over the threshold
   /// that dismisses the loading dialog. Wait for the character instead.
   let sceneCanMount = $derived(
-    (!isObserver && !manualBootstrap) || currentPlayerHp !== null
+    (!isObserver && !manualBootstrap) || spectatorHasEnteredWorld(currentPlayerHp)
   )
   let currentPlayerLevel = $state<number | null>(null)
   let currentPlayerTotalXp = $state<number | null>(null)
