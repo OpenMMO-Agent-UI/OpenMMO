@@ -12,7 +12,7 @@ use onlinerpg_shared::inventory::GroundItem;
 use onlinerpg_shared::pathfinding::{self, PassabilityCache, PathResult};
 use onlinerpg_shared::Position;
 use onlinerpg_shared::{
-    Character, ClientMessage, Monster, MonsterState, Player, PlayerId, ServerMessage,
+    Character, ClientMessage, Monster, MonsterState, NoSpawnZone, Player, PlayerId, ServerMessage,
 };
 use onlinerpg_terrain::height::HeightSampler;
 use rand::Rng;
@@ -412,6 +412,8 @@ impl SharedState {
             urgent_notify: Arc::new(Notify::new()),
             monster_ai: MonsterAiManager::new(),
             pending_commands: Vec::new(),
+            no_spawn_zones: Vec::new(),
+            fetched_zone_regions: HashSet::new(),
             watch,
             follow_task: None,
             wake_urgency: EventUrgency::Noise,

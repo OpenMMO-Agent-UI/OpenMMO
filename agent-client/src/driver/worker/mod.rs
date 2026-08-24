@@ -23,7 +23,9 @@ use tracing::{info, warn};
 
 use super::combat::{load_attack_cooldown, tick_combat};
 use super::execute::handle_response;
-use super::movement::{coverage_positions, fetch_furniture_around, fetch_houses_around};
+use super::movement::{
+    coverage_positions, fetch_furniture_around, fetch_houses_around, fetch_no_spawn_zones_around,
+};
 use crate::state::SharedState;
 
 pub const HEALING_POTION: &str = "healing_potion";
@@ -434,6 +436,10 @@ pub async fn worker_driver(
         tokio::join!(
             fetch_houses_around(&world_cache, &area, &api_base_url, &label),
             fetch_furniture_around(&world_cache, &area, &api_base_url, &label),
+            // Before the first decision, not after: the fighter's very first
+            // tick asks whether it is standing in a town, and an empty answer
+            // is indistinguishable from "no towns exist".
+            fetch_no_spawn_zones_around(&state, &area, &api_base_url, &label),
         );
         around.map(|p| (p.x, p.z))
     };
@@ -556,8 +562,9 @@ pub async fn worker_driver(
     }
 }
 
-/// Refetch houses/furniture once we have walked a chunk away, the same rule
-/// the LLM driver uses — otherwise buildings vanish from pathfinding.
+/// Refetch houses/furniture/towns once we have walked a chunk away, the same
+/// rule the LLM driver uses — otherwise buildings vanish from pathfinding and
+/// a town walked into from a fresh region is invisible.
 async fn refresh_world_data(
     state: &Arc<Mutex<SharedState>>,
     world_data_at: &mut Option<(f32, f32)>,
@@ -583,6 +590,7 @@ async fn refresh_world_data(
     tokio::join!(
         fetch_houses_around(&world_cache, &area, api_base_url, label),
         fetch_furniture_around(&world_cache, &area, api_base_url, label),
+        fetch_no_spawn_zones_around(state, &area, api_base_url, label),
     );
     *world_data_at = Some((p.x, p.z));
 }
