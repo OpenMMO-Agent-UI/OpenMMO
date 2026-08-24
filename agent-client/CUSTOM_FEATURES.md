@@ -107,6 +107,21 @@ standable. `level_margin` deliberately does not widen the ring —
 `best_eligible` prefers our own level, so the extra walk unlocks what it then
 declines to pick.
 
+With nothing eligible and no town to leave, the fighter patrols the ring
+rather than idling. Standing still is not patience since v37 — the server
+rolls a spawn per metre walked (`SPAWN_CHANCE_PER_METER`, about one monster
+per 12 m) and none at all for standing still, so idling is the one choice
+guaranteed to produce nothing. `patrol_target` walks one `PATROL_LEG` around
+the ring, holding the radius rather than picking a heading: the monster table
+is gated on distance from the spawn point, spawns land in a ±30° cone off the
+heading, and `is_standable` has no water or height test, so a random
+direction would downgrade the table, scatter the spawns behind us, and walk
+into the sea in turn. A blocked arc falls back to `hunt_target`'s own sweep in
+eighths. `Patrol` remembers where the last leg was issued from: a leg that
+moved us resets the arc offset, so every working leg is the same length,
+while one that left us standing — standable target, unreachable ground —
+reaches further round instead of being reissued unchanged.
+
 A full bag reads a return scroll home rather than walking, keeping the last
 one for the low-health escape — the scroll lands on the spawn point, which is
 both where town is and where the ring is measured from. Supply carried past
