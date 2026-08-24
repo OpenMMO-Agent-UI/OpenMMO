@@ -449,6 +449,9 @@ pub async fn worker_driver(
     let mut last_attack_at = Instant::now() - attack_cooldown;
     let mut dead_since: Option<Instant> = None;
     let mut errand = Errand::Work;
+    // Where the last patrol leg was issued from, so a leg that failed to move
+    // us reaches further round the arc instead of being reissued unchanged.
+    let mut patrol = fighter::Patrol::default();
     // Where the last kill fell (and how many pickups we have tried there), so
     // its drops are the only loot we detour for.
     let mut loot_at: Option<(Position, u32)> = None;
@@ -553,6 +556,7 @@ pub async fn worker_driver(
             &mut town_stop,
             &label,
             &labels,
+            &mut patrol,
         )
         .await;
         if let Some(target) = run(&state, step, &watch, &mut last_turn).await {
@@ -630,6 +634,7 @@ async fn next_step(
     town_stop: &mut usize,
     label: &str,
     labels: &labels::BagLabels,
+    patrol: &mut fighter::Patrol,
 ) -> Vec<Step> {
     let s = state.lock().await;
     let waiting_out_a_failed_trip = town_blocked_until.is_some_and(|t| Instant::now() < t);
@@ -711,7 +716,7 @@ async fn next_step(
     }
 
     match cfg.kind {
-        WorkerKind::Fighter => fighter::step(&s, cfg, should_town_trip(&s, cfg)),
+        WorkerKind::Fighter => fighter::step(&s, cfg, should_town_trip(&s, cfg), patrol),
         WorkerKind::Fisher => {
             let job = fisher::water_job(&s);
             drop(s);

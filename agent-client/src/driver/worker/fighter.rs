@@ -168,6 +168,93 @@ pub(crate) fn escape_target(zones: &[NoSpawnZone], me: Position) -> Option<(f32,
         .map(|&(x, z, _)| (x, z))
 }
 
+/// How far around the ring one patrol leg walks. The move is executed
+/// blocking, so this doubles as how long the fighter goes without looking at
+/// what spawned behind it — and at `SPAWN_CHANCE_PER_METER` (0.08, about one
+/// monster per 12 m) a leg this long is worth roughly two rolls.
+pub(crate) const PATROL_LEG: f32 = 28.0;
+
+/// A leg that ends this close to where it began did not happen.
+const STALLED_WITHIN: f32 = 1.0;
+
+/// What the patrol carries between ticks: where the last leg was issued
+/// from, and how far round the arc it has had to reach for a point.
+#[derive(Debug, Default)]
+pub(crate) struct Patrol {
+    from: Option<(f32, f32)>,
+    turn: u32,
+}
+
+impl Patrol {
+    /// A leg that moved us worked, and the next point is derived from where
+    /// it landed — so the offset goes back to a single leg round. A leg that
+    /// left us where we were did not: the target was standable but
+    /// unreachable (across a river, up a cliff), and reaching further round
+    /// the arc is the only way past it.
+    fn advance(&mut self, me: Position) {
+        let stalled = self
+            .from
+            .is_some_and(|(x, z)| (me.x - x).hypot(me.z - z) <= STALLED_WITHIN);
+        self.turn = if stalled {
+            self.turn.wrapping_add(1)
+        } else {
+            0
+        };
+        self.from = Some((me.x, me.z));
+    }
+}
+
+/// Where to walk with nothing to fight: one leg further around the ring.
+///
+/// Not a random heading, for three reasons the server's own spawn rules
+/// hand us. The monster table is gated on distance from the spawn point
+/// (`min_ambient_town_distance`, `(level - 1) * 70 m`), so drifting inward
+/// quietly drops the types this fighter walked out for — holding the radius
+/// holds the table. Spawns land in a ±30° cone off the heading, so a steady
+/// bearing puts them in front of us where they can be fought and a jittery
+/// one scatters them behind. And `is_standable` has no water or height test,
+/// so a heading picked at random walks into the sea as readily as anywhere.
+///
+/// `turn` only has to differ from the last tick's when the walk did not
+/// land: the preferred candidate is derived from where we stand, so a leg
+/// that actually moved us already picks a fresh point on its own.
+pub(crate) fn patrol_target(
+    s: &SharedState,
+    me: Position,
+    my_level: u32,
+    turn: u32,
+) -> Option<(f32, f32)> {
+    let (sx, sz) = spawn_point();
+    let (dx, dz) = (me.x - sx, me.z - sz);
+    let out = dx.hypot(dz);
+    // The ring is a floor, never a ceiling: a chase that drifted further out
+    // keeps that distance instead of being walked back in.
+    let radius = out.max(hunt_radius(my_level) + ESCAPE_SLACK);
+    let eighth = std::f32::consts::TAU / BEARING_TRIES as f32;
+    // Arc length over radius is the angle that walks one leg around, capped
+    // at an eighth so a small ring cannot turn one leg into most of a lap.
+    let leg = if radius > f32::EPSILON {
+        (PATROL_LEG / radius).min(eighth)
+    } else {
+        eighth
+    };
+    let bearing = if out > f32::EPSILON {
+        dz.atan2(dx)
+    } else {
+        0.0
+    };
+    // One leg on first, then the same sweep in eighths `hunt_target` uses, so
+    // a town or a building sitting on the arc is turned away from rather than
+    // stalled against.
+    std::iter::once(leg * (turn % BEARING_TRIES + 1) as f32)
+        .chain((1..BEARING_TRIES).map(|n| n as f32 * eighth))
+        .find_map(|delta| {
+            let angle = bearing + delta;
+            let (x, z) = (sx + angle.cos() * radius, sz + angle.sin() * radius);
+            is_standable(s, x, z).then_some((x, z))
+        })
+}
+
 /// How close the target must be before we swing. The chase itself gives up
 /// past 20 m (`MAX_CHASE_DISTANCE` in combat.rs), so an attack ordered from
 /// further out is refused before a single step is taken — walk first.
@@ -208,7 +295,12 @@ fn best_eligible<'a>(s: &'a SharedState, cfg: &WorkerConfig) -> Option<&'a Monst
 /// cannot hold loot anyway, and a trip on its retry clock leaves the errand
 /// reading `Work` for a minute or more. Escaping through that window marched
 /// the worker back out of the town it was trying to reach, over and over.
-pub(crate) fn step(s: &SharedState, cfg: &WorkerConfig, town_bound: bool) -> Vec<Step> {
+pub(crate) fn step(
+    s: &SharedState,
+    cfg: &WorkerConfig,
+    town_bound: bool,
+    patrol: &mut Patrol,
+) -> Vec<Step> {
     let Some(player) = s.self_player.as_ref() else {
         return vec![Step::Idle];
     };
@@ -236,7 +328,17 @@ pub(crate) fn step(s: &SharedState, cfg: &WorkerConfig, town_bound: bool) -> Vec
         }
         return match escape_target(&s.no_spawn_zones, me) {
             Some((x, z)) => vec![Step::Walk { x, z }],
-            None => vec![Step::Idle],
+            // Clear of every town with nothing to fight. Since v37 the server
+            // rolls a spawn per metre walked and none whatsoever for standing
+            // still, so idling here is not patience — it is the one choice
+            // guaranteed to produce nothing.
+            None => {
+                patrol.advance(me);
+                match patrol_target(s, me, player.level, patrol.turn) {
+                    Some((x, z)) => vec![Step::Walk { x, z }],
+                    None => vec![Step::Idle],
+                }
+            }
         };
     };
     let (dx, dz) = (target.position.x - me.x, target.position.z - me.z);

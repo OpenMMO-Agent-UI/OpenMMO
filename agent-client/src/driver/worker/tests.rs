@@ -305,7 +305,16 @@ fn the_fighter_leaves_someone_elses_dead_and_off_floor_monsters_alone() {
     see(&mut s, upstairs);
 
     assert_eq!(fighter::eligible_target(&s, &cfg()), None);
-    assert_eq!(fighter::step(&s, &cfg(), false), vec![Step::Idle]);
+    // Nothing to fight is not a reason to stand still: since v37 a spawn is
+    // rolled per metre walked, so the fighter patrols instead.
+    assert!(
+        matches!(
+            fighter::step(&s, &cfg(), false, &mut fighter::Patrol::default()).as_slice(),
+            [Step::Walk { .. }]
+        ),
+        "expected a patrol leg, got {:?}",
+        fighter::step(&s, &cfg(), false, &mut fighter::Patrol::default())
+    );
 }
 
 /// The chase gives up past 20 m, so ordering an attack from further out
@@ -314,7 +323,8 @@ fn the_fighter_leaves_someone_elses_dead_and_off_floor_monsters_alone() {
 fn a_distant_target_is_walked_up_to_before_it_is_attacked() {
     let mut s = state_at(0.0, 0.0);
     see(&mut s, monster("kobold-far", "kobold", 0.0, 25.0));
-    let Step::Walk { x, z } = &fighter::step(&s, &cfg(), false)[0] else {
+    let Step::Walk { x, z } = &fighter::step(&s, &cfg(), false, &mut fighter::Patrol::default())[0]
+    else {
         panic!("expected a walk toward the distant target");
     };
     assert_eq!(*x, 0.0);
@@ -325,7 +335,7 @@ fn a_distant_target_is_walked_up_to_before_it_is_attacked() {
 
     see(&mut s, monster("kobold-near", "kobold", 0.0, 10.0));
     assert_eq!(
-        fighter::step(&s, &cfg(), false),
+        fighter::step(&s, &cfg(), false, &mut fighter::Patrol::default()),
         vec![Step::Attack("kobold-near".into())]
     );
 }
@@ -352,7 +362,12 @@ fn the_monsters_assigned_to_us_are_the_ones_to_fight() {
 #[test]
 fn a_fighter_with_nothing_to_hunt_walks_out_of_the_towns_dead_zone() {
     let mut s = state_at(5.0, 0.0);
-    assert_eq!(fighter::step(&s, &cfg(), false), vec![Step::Idle]);
+    // With no town known, there is nothing to escape — that is the patrol's
+    // case, not a stand-still.
+    assert!(matches!(
+        fighter::step(&s, &cfg(), false, &mut fighter::Patrol::default()).as_slice(),
+        [Step::Walk { .. }]
+    ));
 
     s.no_spawn_zones = vec![NoSpawnZone {
         min_x: -20.0,
@@ -362,7 +377,7 @@ fn a_fighter_with_nothing_to_hunt_walks_out_of_the_towns_dead_zone() {
     }];
     // Nearest way out is +x: 20 + 30 margin + 20 slack, z unchanged.
     assert_eq!(
-        fighter::step(&s, &cfg(), false),
+        fighter::step(&s, &cfg(), false, &mut fighter::Patrol::default()),
         vec![Step::Walk { x: 70.0, z: 0.0 }]
     );
 
@@ -370,7 +385,7 @@ fn a_fighter_with_nothing_to_hunt_walks_out_of_the_towns_dead_zone() {
     assert_eq!(
         fighter::escape_target(&s.no_spawn_zones, s.self_player.as_ref().unwrap().position),
         None,
-        "clear of the margin: stand still and wait for a spawn"
+        "clear of the margin: the patrol takes it from here"
     );
 }
 
@@ -561,6 +576,7 @@ async fn a_full_bag_sells_at_the_merchant_instead_of_turning_round() {
         &mut stop,
         "test",
         &labels,
+        &mut fighter::Patrol::default(),
     )
     .await;
     assert!(
@@ -616,6 +632,7 @@ async fn an_unmarked_full_bag_writes_the_town_trip_off_and_leaves() {
                 &mut stop,
                 "test",
                 &labels,
+                &mut fighter::Patrol::default(),
             )
             .await
         };
@@ -674,6 +691,7 @@ async fn a_blocked_trip_must_not_turn_a_full_bag_round_at_the_boundary() {
         &mut stop,
         "test",
         &labels,
+        &mut fighter::Patrol::default(),
     )
     .await;
     assert!(
@@ -723,6 +741,7 @@ async fn a_full_bag_must_not_park_forever_when_town_cannot_help() {
                 &mut stop,
                 "test",
                 &labels,
+                &mut fighter::Patrol::default(),
             )
             .await
         };
@@ -832,6 +851,7 @@ async fn a_full_bag_walks_into_town_and_sells() {
                 &mut stop,
                 "test",
                 &labels,
+                &mut fighter::Patrol::default(),
             )
             .await
         };
@@ -915,6 +935,7 @@ async fn a_merchant_across_town_is_found_instead_of_written_off() {
                 &mut stop,
                 "test",
                 &labels,
+                &mut fighter::Patrol::default(),
             )
             .await
         };
@@ -1035,10 +1056,12 @@ fn the_fighter_walks_out_to_its_ring_past_the_fodder_underfoot() {
     let (sx, sz) = fighter::spawn_point();
     see(&mut s, monster("kobold-1", "kobold", sx + 11.0, sz));
 
-    let [Step::Walk { x, z }] = fighter::step(&s, &cfg(), false).as_slice()[..] else {
+    let [Step::Walk { x, z }] =
+        fighter::step(&s, &cfg(), false, &mut fighter::Patrol::default()).as_slice()[..]
+    else {
         panic!(
             "expected a walk out, got {:?}",
-            fighter::step(&s, &cfg(), false)
+            fighter::step(&s, &cfg(), false, &mut fighter::Patrol::default())
         );
     };
     assert!(
@@ -1052,7 +1075,7 @@ fn the_fighter_walks_out_to_its_ring_past_the_fodder_underfoot() {
     there.self_player.as_mut().unwrap().level = 5;
     see(&mut there, monster("kobold-1", "kobold", sx + 301.0, sz));
     assert_eq!(
-        fighter::step(&there, &cfg(), false),
+        fighter::step(&there, &cfg(), false, &mut fighter::Patrol::default()),
         vec![Step::Attack("kobold-1".to_string())]
     );
 }
@@ -1061,7 +1084,10 @@ fn the_fighter_walks_out_to_its_ring_past_the_fodder_underfoot() {
 fn a_town_trip_outranks_the_walk_out() {
     let mut s = state_out_from_spawn(10.0);
     s.self_player.as_mut().unwrap().level = 5;
-    assert_eq!(fighter::step(&s, &cfg(), true), vec![Step::Idle]);
+    assert_eq!(
+        fighter::step(&s, &cfg(), true, &mut fighter::Patrol::default()),
+        vec![Step::Idle]
+    );
 }
 
 // --- The ride home ---
@@ -1095,6 +1121,7 @@ async fn a_full_bag_reads_a_scroll_home_and_keeps_the_last_one() {
             &mut stop,
             "test",
             &labels,
+            &mut fighter::Patrol::default(),
         )
         .await
     };
@@ -1169,8 +1196,148 @@ fn nothing_above_the_height_cap_is_hunted_or_stood_on() {
     s.self_player.as_mut().unwrap().position.y = fighter::MAX_WALK_Y + 1.0;
     let (sx, sz) = fighter::spawn_point();
     assert_eq!(
-        fighter::step(&s, &cfg(), false),
+        fighter::step(&s, &cfg(), false, &mut fighter::Patrol::default()),
         vec![Step::Walk { x: sx, z: sz }],
         "should head back down to the spawn point"
+    );
+}
+
+/// Since v37 the server rolls a spawn per metre walked (`SPAWN_CHANCE_PER_METER`)
+/// and none whatsoever for standing still, so "nothing nearby" has to mean
+/// walk, not wait. The leg holds its distance from the spawn point on
+/// purpose: the monster table is gated on that distance
+/// (`min_ambient_town_distance`), so drifting inward would quietly drop the
+/// types this fighter walked out here for.
+#[test]
+fn a_fighter_with_nothing_to_fight_patrols_the_ring_instead_of_waiting() {
+    let s = state_at(0.0, 0.0);
+    let me = s.self_player.as_ref().unwrap().position;
+    let (sx, sz) = fighter::spawn_point();
+    let before = (me.x - sx).hypot(me.z - sz);
+
+    let [Step::Walk { x, z }] =
+        fighter::step(&s, &cfg(), false, &mut fighter::Patrol::default()).as_slice()[..]
+    else {
+        panic!(
+            "expected a patrol leg, got {:?}",
+            fighter::step(&s, &cfg(), false, &mut fighter::Patrol::default())
+        );
+    };
+
+    let after = (x - sx).hypot(z - sz);
+    assert!(
+        (after - before).abs() < 1.0,
+        "the ring radius is what holds the monster table: {before} -> {after}"
+    );
+    let walked = (x - me.x).hypot(z - me.z);
+    assert!(
+        (fighter::PATROL_LEG - 2.0..=fighter::PATROL_LEG + 2.0).contains(&walked),
+        "one leg, not a march across the map: {walked}"
+    );
+}
+
+/// The patrol is the last resort, not a competitor: anything eligible is
+/// fought where it stands.
+#[test]
+fn a_monster_outranks_the_patrol() {
+    let mut s = state_at(0.0, 0.0);
+    see(&mut s, monster("kobold", "kobold", 0.0, 5.0));
+
+    assert_eq!(
+        fighter::step(&s, &cfg(), false, &mut fighter::Patrol::default()),
+        vec![Step::Attack("kobold".into())]
+    );
+}
+
+/// `is_standable` is what keeps a leg out of a town or a building, and the
+/// sweep behind it is what stops a blocked arc becoming a stall.
+#[test]
+fn the_patrol_turns_off_a_point_it_cannot_stand_on() {
+    let mut s = state_at(0.0, 0.0);
+    let me = s.self_player.as_ref().unwrap().position;
+    let (x, z) = fighter::patrol_target(&s, me, 1, 0).expect("a clear arc to start with");
+
+    s.no_spawn_zones = vec![NoSpawnZone {
+        min_x: x - 1.0,
+        max_x: x + 1.0,
+        min_z: z - 1.0,
+        max_z: z + 1.0,
+    }];
+
+    let (nx, nz) = fighter::patrol_target(&s, me, 1, 0).expect("another way round");
+    assert!(
+        (nx - x).hypot(nz - z) > 1.0,
+        "expected a different point once the first sits in a town"
+    );
+}
+
+/// A patrol that is working walks the same leg every time. The first cut of
+/// this advanced the arc offset on every leg, so successive legs stretched
+/// 28 m, 56 m, 84 m … up to 224 m before wrapping — and since the move
+/// executes blocking, a longer leg is a longer stretch of not looking at
+/// what spawned behind it.
+#[test]
+fn consecutive_patrol_legs_are_the_same_length() {
+    let mut s = state_at(0.0, 0.0);
+    let mut patrol = fighter::Patrol::default();
+
+    for leg in 0..4 {
+        let me = s.self_player.as_ref().unwrap().position;
+        let [Step::Walk { x, z }] = fighter::step(&s, &cfg(), false, &mut patrol).as_slice()[..]
+        else {
+            panic!("expected a patrol leg on {leg}");
+        };
+
+        let walked = (x - me.x).hypot(z - me.z);
+        assert!(
+            (fighter::PATROL_LEG - 2.0..=fighter::PATROL_LEG + 2.0).contains(&walked),
+            "leg {leg} walked {walked}, not one leg"
+        );
+
+        // The walk lands, which is what makes the next one a fresh leg.
+        s.self_player.as_mut().unwrap().position.x = x;
+        s.self_player.as_mut().unwrap().position.z = z;
+    }
+}
+
+/// A target that is standable but unreachable — across a river, up a cliff —
+/// leaves us exactly where we were. Reissuing it unchanged is how a fighter
+/// grinds against the same rock forever, so a leg that did not move us
+/// reaches further round the arc.
+#[test]
+fn a_leg_that_did_not_move_us_reaches_further_round_the_arc() {
+    let s = state_at(0.0, 0.0);
+    let mut patrol = fighter::Patrol::default();
+
+    let first = fighter::step(&s, &cfg(), false, &mut patrol);
+    // Same position on the next tick: the leg never landed.
+    let second = fighter::step(&s, &cfg(), false, &mut patrol);
+
+    assert_ne!(
+        first, second,
+        "a stalled leg must not be reissued unchanged"
+    );
+}
+
+/// `hunt_radius(1)` is zero, so a level-1 fighter's ring is the spawn point
+/// it is standing on and `hunt_target` never asks it to move anywhere. Before
+/// the patrol that left it idling where it logged in — which is what "it just
+/// stands in the village" looks like from the outside.
+#[test]
+fn a_level_one_fighter_is_given_somewhere_to_walk() {
+    let (sx, sz) = fighter::spawn_point();
+    let mut s = state_at(sx, sz);
+    s.self_player.as_mut().unwrap().level = 1;
+    let me = s.self_player.as_ref().unwrap().position;
+
+    assert_eq!(fighter::hunt_radius(1), 0.0);
+    assert_eq!(fighter::hunt_target(&s, me, 1), None);
+
+    assert!(
+        matches!(
+            fighter::step(&s, &cfg(), false, &mut fighter::Patrol::default()).as_slice(),
+            [Step::Walk { .. }]
+        ),
+        "a level-1 fighter must still be given a direction"
     );
 }
