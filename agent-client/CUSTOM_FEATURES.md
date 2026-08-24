@@ -113,6 +113,19 @@ both where town is and where the ring is measured from. Supply carried past
 its configured cap is sold on that trip without waiting for a Sellable mark:
 writing `potion_stock = 10` is already saying ten is all we want.
 
+Towns come from the terrain API, not the wire. Protocol v37 deleted
+`ServerMessage::NoSpawnZones` along with the whole client-driven spawn system
+(spawning is server-side and granted per metre walked now), but the server
+still refuses to place an ambient monster inside a no-spawn zone, so a worker
+that does not know where towns are stands in one waiting for monsters that
+cannot come. `fetch_no_spawn_zones_around` reads
+`/api/terrain/zones/{rx}/{rz}` — the same endpoint the browser client's map
+editor uses — per region, alongside the houses/furniture prefetch that
+already runs on startup and on every chunk crossing. Only a successful
+response marks a region done: a region with no towns answers with an empty
+list, so a miss is transient and has to stay retryable, and one dropped
+request must not blind the worker to a town it is standing in.
+
 Workers respect the desktop app's bag labels: the sell/drop marks written
 into the character's `instance.txt` under the `<!-- BAG LABELS -->` block are
 re-read on every town errand, and only marked loot is sold / marked junk is
@@ -125,8 +138,10 @@ shared survival/town decisions, plus `fighter.rs`, `fisher.rs`, `labels.rs`,
 `driver/mod.rs` (`mod worker;` + the `pub use`), `orchestrator.rs`
 (`NpcConfig::worker`, entering the game when a worker is configured, spawning
 `worker_driver` in place of the LLM task, the mode log line), `state/mod.rs`
-(`no_spawn_zones` made `pub` — towns are how a worker finds a merchant), and
-`item_defs.rs` (`ItemDef::weight`, for the bag-full check against the
+(`no_spawn_zones` and `fetched_zone_regions` — wholly ours since v37, not a
+`pub` on an upstream field any more), `driver/movement.rs`
+(`RegionZones` + `fetch_no_spawn_zones_around`, modelled on
+`fetch_furniture_around` right above it), and `item_defs.rs` (`ItemDef::weight`, for the bag-full check against the
 server's STR×15 carry cap). `fighter.rs` also reads `data-src/world.json`
 directly for `spawnPosition` — the tracked source file, not the gitignored
 `data/` output the monster levels come from.
@@ -142,7 +157,15 @@ so a rename upstream is a compile error here, never silent drift.
 **Conflict watch**: `METERS_PER_LEVEL` here mirrors master's
 `AMBIENT_SPAWN_METERS_PER_LEVEL`, the way `TOWN_MARGIN` mirrors
 `NO_SPAWN_MARGIN`. Master retuning either constant is silent here — check
-both on every sync.
+both on every sync. The same goes for the town data itself: every failure
+mode of `no_spawn_zones` is a *stall*, never an error. An empty list reads as
+"no towns anywhere", which makes `escape_target` return `None` and parks the
+fighter exactly where it stands — and the unit tests set the field directly,
+so they keep passing while nothing fills it. That is how v37 nearly shipped
+with the feature silently inert. If master changes the shape of
+`/api/terrain/zones/{rx}/{rz}` or the `noSpawnZones` key, `RegionZones`
+deserialization fails into an empty list rather than complaining: check the
+endpoint by hand on a sync that touches the zone or terrain code.
 
 **Verify**: `cargo test -p agent-client worker` (39 tests: eligibility and
 level-matched target choice, approach, potion/scroll/eat/town-trip decisions,

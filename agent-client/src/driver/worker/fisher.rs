@@ -94,7 +94,7 @@ async fn sample_grid(job: &WaterJob, range: f32, step: f32) -> Vec<(f32, f32, bo
                 continue;
             }
             let height = job.height.sample_height(x, z).await.ok();
-            let surface = job.splat.primary_at(x, z).await.ok();
+            let surface = job.splat.dominant_at(x, z).await.ok();
             out.push((x, z, is_water(surface, height)));
         }
     }

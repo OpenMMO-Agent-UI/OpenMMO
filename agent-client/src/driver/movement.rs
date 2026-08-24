@@ -657,6 +657,73 @@ pub(super) async fn fetch_furniture_around(
     }
 }
 
+/// Region zone data, as served by `/api/terrain/zones/{rx}/{rz}` — the same
+/// endpoint the browser client's map editor reads.
+#[derive(serde::Deserialize)]
+struct RegionZones {
+    #[serde(default, rename = "noSpawnZones")]
+    no_spawn_zones: Vec<onlinerpg_shared::NoSpawnZone>,
+}
+
+/// Fetch the towns around `positions`.
+///
+/// Protocol v37 deleted `ServerMessage::NoSpawnZones` along with the whole
+/// client-driven spawn system, so this no longer arrives on the wire. The
+/// server still refuses to place an ambient monster inside a no-spawn zone
+/// (`ambient_spawn.rs`), and spawns are now granted per metre walked rather
+/// than by the clock — so a worker that does not know where towns are stands
+/// in one waiting for monsters that cannot come, which is a silent stall
+/// rather than an error. Same per-region shape as `fetch_furniture_around`,
+/// against `zones` instead of `objects`.
+pub(super) async fn fetch_no_spawn_zones_around(
+    state: &Arc<Mutex<SharedState>>,
+    positions: &[(f32, f32)],
+    api_base_url: &str,
+    label: &str,
+) {
+    let mut regions = HashSet::new();
+    for (x, z) in positions {
+        insert_region(&mut regions, *x, *z);
+    }
+    {
+        let s = state.lock().await;
+        regions.retain(|region| !s.fetched_zone_regions.contains(region));
+    }
+    if regions.is_empty() {
+        return;
+    }
+
+    let client = http_client();
+    let fetches = regions.iter().map(|&(rx, rz)| {
+        let client = &client;
+        let url = format!("{api_base_url}/api/terrain/zones/{rx}/{rz}");
+        async move {
+            let resp = match client.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => resp.json::<RegionZones>().await.ok(),
+                _ => None,
+            };
+            (rx, rz, resp)
+        }
+    });
+    let results = futures_util::future::join_all(fetches).await;
+
+    let mut s = state.lock().await;
+    let mut learned = 0usize;
+    for (rx, rz, resp) in results {
+        // Only a success marks the region done: a region that genuinely has
+        // no towns answers with an empty list, so a miss here is a transient
+        // failure and must stay retryable. Blinding ourselves to a town on
+        // one dropped request would park the worker in it indefinitely.
+        let Some(resp) = resp else { continue };
+        s.fetched_zone_regions.insert((rx, rz));
+        learned += resp.no_spawn_zones.len();
+        s.no_spawn_zones.extend(resp.no_spawn_zones);
+    }
+    if learned > 0 {
+        debug!("[{label}] Learned {learned} no-spawn zone(s)");
+    }
+}
+
 /// Insert a position's chunk and its 8 neighbors into the set.
 fn insert_chunk_neighbors(chunks: &mut HashSet<(i32, i32)>, x: f32, z: f32) {
     let cx = (x / HOUSING_CHUNK_SIZE).floor() as i32;
@@ -832,5 +899,40 @@ mod tests {
         };
         let legs = force_move_legs(&from, to);
         assert_eq!(legs, vec![to]);
+    }
+
+    /// The live endpoint's shape, captured from `GET /api/terrain/zones/-2/4`
+    /// — the region the world spawn point sits in, whose two zones are the
+    /// town and one map-editor sliver.
+    ///
+    /// Pinned because every failure mode of this parse is an *empty list*,
+    /// not an error: rename a field upstream and `no_spawn_zones` silently
+    /// becomes "no towns anywhere", which parks the fighter where it stands
+    /// with nothing in any log to say why.
+    #[test]
+    fn region_zones_parses_the_terrain_api_shape() {
+        let body = r#"{"monsterSpawns":[{"monsterType":"scp939","maxTotal":10}],
+            "noSpawnZones":[
+              {"maxX":-1440.4592,"maxZ":4822.6214,"minX":-1554.4193,"minZ":4704.4310},
+              {"maxX":-1439.6045,"maxZ":4774.6276,"minX":-1447.0233,"minZ":4770.3604}
+            ]}"#;
+
+        let parsed: RegionZones = serde_json::from_str(body).expect("terrain zone payload");
+
+        assert_eq!(parsed.no_spawn_zones.len(), 2);
+        let town = &parsed.no_spawn_zones[0];
+        assert!(town.contains(-1500.0, 4750.0), "spawn point is inside town");
+        assert!(!town.contains(-1600.0, 4750.0), "west of town is outside");
+    }
+
+    /// A region with no towns answers 200 with the key absent. That must read
+    /// as "none here", not as a failed fetch — `#[serde(default)]` is what
+    /// keeps the region markable as done.
+    #[test]
+    fn a_region_without_towns_parses_as_empty() {
+        let parsed: RegionZones =
+            serde_json::from_str(r#"{"monsterSpawns":[]}"#).expect("empty region payload");
+
+        assert!(parsed.no_spawn_zones.is_empty());
     }
 }
