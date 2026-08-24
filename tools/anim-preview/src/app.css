@@ -1,0 +1,123 @@
+/*
+ * A darkroom for looking at takes.
+ *
+ * The palette is a blueprint: deep blue-black ground, chalk lines, and exactly
+ * one warm colour. Amber is spent only on a decision — the take chosen for a
+ * motion, and the motion currently being judged. Nothing else is allowed to be
+ * warm, so the eye finds the decided rungs down the ladder without reading.
+ *
+ * The type is monospace throughout, at four sizes. A sheet whose whole job is
+ * comparing bone counts and hip heights across 28 rigs wants figures that line
+ * up in a column; the personality comes from case and tracking instead of from
+ * a second typeface.
+ */
+
+:root {
+  --ink: #0e1621;
+  --panel: #16202d;
+  --raised: #1c2837;
+  --line: #24374b;
+  --line-soft: #1b2836;
+  --chalk: #dde7f1;
+  --dim: #7c96b2;
+  --faint: #4d637c;
+  --signal: #ffb347;
+  --signal-dim: #8a6430;
+  --halt: #d9705b;
+
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  --rail: 232px;
+  --row: 26px;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: var(--ink);
+  color: var(--chalk);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+/* Uppercase tracked mono, the one typographic gesture the page repeats. */
+.eyebrow {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  color: var(--dim);
+  cursor: pointer;
+  letter-spacing: 0.04em;
+  transition: border-color 120ms, color 120ms, background 120ms;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--faint);
+  color: var(--chalk);
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-key {
+  border-color: var(--signal-dim);
+  color: var(--signal);
+}
+
+.btn-key:hover:not(:disabled) {
+  border-color: var(--signal);
+  background: rgba(255, 179, 71, 0.08);
+  color: var(--signal);
+}
+
+:focus-visible {
+  outline: 1px solid var(--signal);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 1ms !important;
+    animation-duration: 1ms !important;
+  }
+}

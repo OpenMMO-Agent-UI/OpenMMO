@@ -255,3 +255,144 @@ describe('groundRetargetedClips rest clip', () => {
     expect(await lowestAtEnd(grounded, makeRig(1))).toBeCloseTo(-0.05, 2)
   })
 })
+
+// The same skeleton with a rest rotation put on one bone — and so on every
+// bone below it. Bone offsets run along local +Y, so a roll about Y leaves every
+// joint where it was and changes only the frame the mesh is bound in: cyclop's
+// legs against the pack's.
+function rigWithRestRotation(
+  ...rotations: [bone: string, axis: 'x' | 'y', degrees: number][]
+): THREE.Group {
+  const root = makeRig(1)
+  for (const [boneName, axis, degrees] of rotations) {
+    const rotation = new THREE.Quaternion().setFromAxisAngle(
+      axis === 'y' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0),
+      THREE.MathUtils.degToRad(degrees)
+    )
+    root.traverse((object) => {
+      if (object.name === boneName) object.quaternion.premultiply(rotation)
+    })
+  }
+  root.updateMatrixWorld(true)
+  const mesh = root.children[0] as THREE.SkinnedMesh
+  mesh.bind(new THREE.Skeleton(mesh.skeleton.bones))
+  root.updateMatrixWorld(true)
+  return root
+}
+
+function bendClip(name: string): THREE.AnimationClip {
+  const bent = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(1, 0, 0),
+    Math.PI / 2
+  )
+  return new THREE.AnimationClip(name, 1, [
+    new THREE.QuaternionKeyframeTrack(
+      'LeftArm.quaternion',
+      [0, 1],
+      [0, 0, 0, 1, bent.x, bent.y, bent.z, bent.w]
+    ),
+  ])
+}
+
+function worldQuaternionOf(rig: THREE.Object3D, boneName: string) {
+  rig.updateMatrixWorld(true)
+  let found: THREE.Object3D | undefined
+  rig.traverse((object) => {
+    if ((object as THREE.Bone).isBone && object.name === boneName)
+      found = object
+  })
+  return found!.getWorldQuaternion(new THREE.Quaternion())
+}
+
+/** World rotation of one bone at the end of a clip, and at rest. */
+function poseAtEnd(
+  rig: THREE.Object3D,
+  clip: THREE.AnimationClip,
+  boneName = 'LeftArm'
+) {
+  const rest = worldQuaternionOf(rig, boneName)
+  const mixer = new THREE.AnimationMixer(rig.children[0])
+  mixer.clipAction(clip).play()
+  mixer.setTime(clip.duration)
+  const posed = worldQuaternionOf(rig, boneName)
+  mixer.stopAllAction()
+  return { rest, posed, motion: posed.clone().multiply(rest.clone().invert()) }
+}
+
+function degreesBetween(a: THREE.Quaternion, b: THREE.Quaternion): number {
+  const between = a.clone().invert().multiply(b)
+  return THREE.MathUtils.radToDeg(
+    2 * Math.acos(Math.min(1, Math.abs(between.w)))
+  )
+}
+
+describe('rest poses that do not share the pack convention', () => {
+  it('gives a rig rolled 180° the motion rather than the orientation', async () => {
+    const source = packLikeSource()
+    const clip = bendClip('roll_bend')
+    const target = rigWithRestRotation(['Hips', 'y', 180])
+
+    const [retargeted] = await retargetAnimationsForCharacterModel(
+      target,
+      source,
+      [clip]
+    )
+    const from = poseAtEnd(source, clip)
+    const onto = poseAtEnd(target, retargeted)
+
+    // Same motion off each rig's own rest — the arm bends the way the pack's
+    // arm bends. Copying the pack's orientation outright would put the target
+    // 180° from that, which is cyclop's knees bending backwards.
+    expect(degreesBetween(onto.motion, from.motion)).toBeLessThan(1)
+    expect(degreesBetween(onto.posed, from.posed)).toBeGreaterThan(179)
+  })
+
+  it('corrects the misrolled bone and leaves the rest of the rig alone', async () => {
+    const source = packLikeSource()
+    const clip = bendClip('one_bone_bend')
+    // One bone off the convention, on a rig whose arm merely binds 40° away —
+    // the shape cyclop has, where only the legs are rolled.
+    const target = rigWithRestRotation(
+      ['LeftArm', 'x', 40],
+      ['LeftHand', 'y', 180]
+    )
+
+    const [retargeted] = await retargetAnimationsForCharacterModel(
+      target,
+      source,
+      [clip]
+    )
+    const hand = poseAtEnd(target, retargeted, 'LeftHand')
+    const handFrom = poseAtEnd(source, clip, 'LeftHand')
+    const arm = poseAtEnd(target, retargeted, 'LeftArm')
+    const armFrom = poseAtEnd(source, clip, 'LeftArm')
+
+    // Only the rolled bone changes hands. Correcting the whole rig instead is
+    // what put cyclop's and lizardfolk's arms 50-80° off every other rig on the
+    // sheet, which is a bind pose the rest of the fleet is held to as well.
+    expect(degreesBetween(hand.motion, handFrom.motion)).toBeLessThan(1)
+    expect(degreesBetween(hand.posed, handFrom.posed)).toBeGreaterThan(150)
+    expect(degreesBetween(arm.posed, armFrom.posed)).toBeLessThan(1)
+  })
+
+  it('leaves a rig within the limit on the pack orientation', async () => {
+    const source = packLikeSource()
+    const clip = bendClip('tilt_bend')
+    // 86° is the worst any shipped rig reaches against any pack — gnoll against
+    // combat_melee — and it has to stay on the orientations it has today.
+    const target = rigWithRestRotation(['LeftArm', 'x', 86])
+
+    const [retargeted] = await retargetAnimationsForCharacterModel(
+      target,
+      source,
+      [clip]
+    )
+    const from = poseAtEnd(source, clip)
+    const onto = poseAtEnd(target, retargeted)
+
+    // A bind difference this side of the limit is a bind pose, not a
+    // convention: the rig keeps taking the pack's absolute orientations,
+    // exactly as it did before.
+    expect(degreesBetween(onto.posed, from.posed)).toBeLessThan(1)
+  })
+})

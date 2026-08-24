@@ -1,0 +1,195 @@
+/**
+ * The bone vocabulary the game speaks.
+ *
+ * `doc/ANIMATION.md`: the character rigs are Mixamo's, exported with the
+ * `mixamorig:` prefix stripped. Anything a monster wants to share animations
+ * with — or hang a weapon off — has to land on these names.
+ */
+export const STANDARD_BONES = [
+  'Hips',
+  'Spine',
+  'Spine1',
+  'Spine2',
+  'Neck',
+  'Head',
+  'HeadTop_End',
+  'LeftEye',
+  'RightEye',
+  'LeftShoulder',
+  'LeftArm',
+  'LeftForeArm',
+  'LeftHand',
+  'LeftHandThumb1',
+  'LeftHandThumb2',
+  'LeftHandThumb3',
+  'LeftHandThumb4',
+  'LeftHandIndex1',
+  'LeftHandIndex2',
+  'LeftHandIndex3',
+  'LeftHandIndex4',
+  'LeftHandMiddle1',
+  'LeftHandMiddle2',
+  'LeftHandMiddle3',
+  'LeftHandMiddle4',
+  'LeftHandRing1',
+  'LeftHandRing2',
+  'LeftHandRing3',
+  'LeftHandRing4',
+  'LeftHandPinky1',
+  'LeftHandPinky2',
+  'LeftHandPinky3',
+  'LeftHandPinky4',
+  'RightShoulder',
+  'RightArm',
+  'RightForeArm',
+  'RightHand',
+  'RightHandThumb1',
+  'RightHandThumb2',
+  'RightHandThumb3',
+  'RightHandThumb4',
+  'RightHandIndex1',
+  'RightHandIndex2',
+  'RightHandIndex3',
+  'RightHandIndex4',
+  'RightHandMiddle1',
+  'RightHandMiddle2',
+  'RightHandMiddle3',
+  'RightHandMiddle4',
+  'RightHandRing1',
+  'RightHandRing2',
+  'RightHandRing3',
+  'RightHandRing4',
+  'RightHandPinky1',
+  'RightHandPinky2',
+  'RightHandPinky3',
+  'RightHandPinky4',
+  'LeftUpLeg',
+  'LeftLeg',
+  'LeftFoot',
+  'LeftToeBase',
+  'LeftToe_End',
+  'RightUpLeg',
+  'RightLeg',
+  'RightFoot',
+  'RightToeBase',
+  'RightToe_End',
+] as const
+
+export type StandardBone = (typeof STANDARD_BONES)[number]
+
+/** Without these the model cannot be retargeted, grounded, or armed. */
+export const CRITICAL_BONES: StandardBone[] = ['Hips', 'RightHand', 'LeftFoot', 'RightFoot']
+
+/** The silhouette. Missing one of these makes shared animations look wrong. */
+export const CORE_BONES: StandardBone[] = [
+  'Hips',
+  'Spine',
+  'Neck',
+  'Head',
+  'LeftArm',
+  'LeftForeArm',
+  'LeftHand',
+  'RightArm',
+  'RightForeArm',
+  'RightHand',
+  'LeftUpLeg',
+  'LeftLeg',
+  'LeftFoot',
+  'RightUpLeg',
+  'RightLeg',
+  'RightFoot',
+]
+
+export const BONE_PARENT: Partial<Record<StandardBone, StandardBone>> = {
+  Spine: 'Hips',
+  Spine1: 'Spine',
+  Spine2: 'Spine1',
+  Neck: 'Spine2',
+  Head: 'Neck',
+  HeadTop_End: 'Head',
+  LeftEye: 'Head',
+  RightEye: 'Head',
+  LeftShoulder: 'Spine2',
+  LeftArm: 'LeftShoulder',
+  LeftForeArm: 'LeftArm',
+  LeftHand: 'LeftForeArm',
+  RightShoulder: 'Spine2',
+  RightArm: 'RightShoulder',
+  RightForeArm: 'RightArm',
+  RightHand: 'RightForeArm',
+  LeftUpLeg: 'Hips',
+  LeftLeg: 'LeftUpLeg',
+  LeftFoot: 'LeftLeg',
+  LeftToeBase: 'LeftFoot',
+  LeftToe_End: 'LeftToeBase',
+  RightUpLeg: 'Hips',
+  RightLeg: 'RightUpLeg',
+  RightFoot: 'RightLeg',
+  RightToeBase: 'RightFoot',
+  RightToe_End: 'RightToeBase',
+  ...Object.fromEntries(
+    (['Left', 'Right'] as const).flatMap((side) =>
+      (['Thumb', 'Index', 'Middle', 'Ring', 'Pinky'] as const).flatMap((finger) =>
+        [1, 2, 3, 4].map((j) => [
+          `${side}Hand${finger}${j}`,
+          j === 1 ? `${side}Hand` : `${side}Hand${finger}${j - 1}`,
+        ])
+      )
+    )
+  ),
+} as Partial<Record<StandardBone, StandardBone>>
+
+/**
+ * How other riggers spell the same joint. Keys are normalised (lower case, no
+ * separators); the side token is stripped before lookup.
+ */
+export const LIMB_ALIASES: Record<string, string> = {
+  pelvis: 'Hips',
+  hip: 'Hips',
+  hips: 'Hips',
+  spine: 'Spine',
+  root: 'Hips',
+  bip01pelvis: 'Hips',
+  spine01: 'Spine',
+  spine02: 'Spine1',
+  spine03: 'Spine2',
+  chest: 'Spine1',
+  upperchest: 'Spine2',
+  torso: 'Spine',
+  clavicle: 'Shoulder',
+  collar: 'Shoulder',
+  shoulder: 'Shoulder',
+  upperarm: 'Arm',
+  arm: 'Arm',
+  lowerarm: 'ForeArm',
+  forearm: 'ForeArm',
+  elbow: 'ForeArm',
+  hand: 'Hand',
+  wrist: 'Hand',
+  thigh: 'UpLeg',
+  upleg: 'UpLeg',
+  upperleg: 'UpLeg',
+  calf: 'Leg',
+  shin: 'Leg',
+  lowerleg: 'Leg',
+  knee: 'Leg',
+  leg: 'Leg',
+  foot: 'Foot',
+  ankle: 'Foot',
+  toebase: 'ToeBase',
+  ball: 'ToeBase',
+  toe: 'ToeBase',
+  eye: 'Eye',
+  neck: 'Neck',
+  head: 'Head',
+}
+
+export const FINGER_ALIASES: Record<string, string> = {
+  thumb: 'Thumb',
+  index: 'Index',
+  middle: 'Middle',
+  mid: 'Middle',
+  ring: 'Ring',
+  pinky: 'Pinky',
+  little: 'Pinky',
+}

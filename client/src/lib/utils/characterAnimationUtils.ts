@@ -19,7 +19,7 @@ export interface RetargetSourceScenes {
   combatMelee?: THREE.Object3D | null
 }
 
-const ANIMATION_SOURCE_BY_NAME: Record<AnimationName, AnimationSource> = {
+export const ANIMATION_SOURCE_BY_NAME: Record<AnimationName, AnimationSource> = {
   [AnimationName.IDLE1]: 'locomotion',
   [AnimationName.IDLE2]: 'locomotion',
   [AnimationName.IDLE3]: 'locomotion',
@@ -40,6 +40,11 @@ const ANIMATION_SOURCE_BY_NAME: Record<AnimationName, AnimationSource> = {
   [AnimationName.DYING]: 'combat_melee',
   [AnimationName.HIT]: 'combat_melee',
   [AnimationName.COMBAT_IDLE]: 'combat_melee',
+}
+
+/** @types/three does not know about SkeletonUtils' `localOffsets` yet. */
+type RetargetClipOptions = Parameters<typeof SkeletonUtils.retargetClip>[3] & {
+  localOffsets?: Record<string, THREE.Matrix4>
 }
 
 const RETARGET_TRACK_NAME_PATTERN = /^\.bones\[(.+?)\]\.(position|quaternion)$/
@@ -329,6 +334,107 @@ function buildBoneNameMap(
   return nameMap
 }
 
+/**
+ * Past this, a bone's rest orientation does not differ by a bind pose — it
+ * differs by a rigging convention. cyclop, lizardfolk and stone_golem came off a
+ * rigger that rolls the leg bones ~180° from Mixamo's, so those bones sit that
+ * far from the pack's while still pointing down the limb.
+ *
+ * The shipped rigs leave a wide gap to put this in: 86° is the worst any of them
+ * reaches against any pack (gnoll against combat_melee), and 170° the least a
+ * misrolled leg bone reaches against any.
+ */
+const REST_POSE_CONVENTION_LIMIT = THREE.MathUtils.degToRad(120)
+
+/**
+ * Bones a rig is judged on before any of it is corrected. Fingers are left out:
+ * every rig curls them differently in bind (up to 140° on ogre) and that is a
+ * bind pose, not a convention — judged on all bones, half the shipped rigs would
+ * trip the limit.
+ */
+const SILHOUETTE_BONES = [
+  'Hips',
+  'Spine',
+  'Neck',
+  'Head',
+  'LeftArm',
+  'LeftForeArm',
+  'LeftHand',
+  'RightArm',
+  'RightForeArm',
+  'RightHand',
+  'LeftUpLeg',
+  'LeftLeg',
+  'LeftFoot',
+  'RightUpLeg',
+  'RightLeg',
+  'RightFoot',
+] as const
+
+/**
+ * Per-bone rotation that turns the pack's rest orientation into this rig's, for
+ * the bones that are rolled off the pack's convention.
+ *
+ * SkeletonUtils copies the source bone's *absolute* world rotation onto the
+ * target, which is right only while both rigs roll their bones the same way. A
+ * bone that does not gets its mesh wrapped around the bone axis instead — 180°
+ * on cyclop's legs, which reads as knees bending backwards. An offset makes
+ * `retargetClip` drive that bone by the source's motion relative to each rest
+ * pose (`R_source(t) · R_source_rest⁻¹ · R_target_rest`) rather than by the
+ * source's orientation outright.
+ *
+ * Only the bones over the limit get one. Everything else — including every bone
+ * of a rig with none — keeps taking the pack's orientation, because that is what
+ * puts all 28 rigs in the same pose and the whole point of the sheet is
+ * comparing them. The rest of a misrolled rig's gap is the ordinary bind-pose
+ * difference every rig has (cyclop's arm sits 54° off combat_melee's, troll's
+ * 67°), and correcting it on two rigs and no others is what made cyclop and
+ * lizardfolk hold a sword unlike anything else on the sheet.
+ */
+function buildRestPoseOffsets(
+  targetSkinnedMesh: THREE.SkinnedMesh,
+  sourceSkinnedMesh: THREE.SkinnedMesh,
+  boneNameMap: Record<string, string>
+): Record<string, THREE.Matrix4> | undefined {
+  const sourceBones = new Map(
+    sourceSkinnedMesh.skeleton.bones.map((bone) => [bone.name, bone])
+  )
+  const sourceRest = new THREE.Quaternion()
+  const targetRest = new THREE.Quaternion()
+  const gaps = new Map<string, THREE.Quaternion>()
+  const silhouette = new Set<string>(SILHOUETTE_BONES)
+  let misrolled = false
+
+  for (const targetBone of targetSkinnedMesh.skeleton.bones) {
+    const sourceBone = sourceBones.get(boneNameMap[targetBone.name])
+    if (!sourceBone) continue
+
+    targetBone.getWorldQuaternion(targetRest)
+    sourceBone.getWorldQuaternion(sourceRest)
+    const gap = sourceRest.clone().invert().multiply(targetRest)
+    gaps.set(targetBone.name, gap)
+
+    if (
+      silhouette.has(targetBone.name) &&
+      angleOf(gap) > REST_POSE_CONVENTION_LIMIT
+    ) {
+      misrolled = true
+    }
+  }
+  if (!misrolled) return undefined
+
+  const offsets: Record<string, THREE.Matrix4> = {}
+  for (const [boneName, gap] of gaps) {
+    if (angleOf(gap) <= REST_POSE_CONVENTION_LIMIT) continue
+    offsets[boneName] = new THREE.Matrix4().makeRotationFromQuaternion(gap)
+  }
+  return offsets
+}
+
+function angleOf(rotation: THREE.Quaternion): number {
+  return 2 * Math.acos(Math.min(1, Math.abs(rotation.w)))
+}
+
 function resolveHipBoneName(sourceSkinnedMesh: THREE.SkinnedMesh): string {
   const sourceBoneNames = new Set(
     sourceSkinnedMesh.skeleton.bones.map((bone) => bone.name)
@@ -417,6 +523,12 @@ export async function retargetAnimationsForCharacterModel(
   const boneNameMap = buildBoneNameMap(targetSkinnedMesh, sourceSkinnedMesh)
   if (Object.keys(boneNameMap).length === 0) return clips
 
+  const restOffsets = buildRestPoseOffsets(
+    targetSkinnedMesh,
+    sourceSkinnedMesh,
+    boneNameMap
+  )
+
   const targetProfileKey = buildSkeletonProfileKey(targetSkinnedMesh)
   const sourceProfileKey = buildSkeletonProfileKey(sourceSkinnedMesh)
   const hipBoneName = resolveHipBoneName(sourceSkinnedMesh)
@@ -449,7 +561,8 @@ export async function retargetAnimationsForCharacterModel(
           preserveBoneMatrix: true,
           useTargetMatrix: false,
           useFirstFramePosition: false,
-        }
+          localOffsets: restOffsets,
+        } as RetargetClipOptions
       )
       const normalizedClip = normalizeRetargetedClipTrackNames(
         retargetedClip,
@@ -728,22 +841,27 @@ const sharedPackClipsByModel = new Map<string, Promise<THREE.AnimationClip[]>>()
  * character bone names but with its own bone offsets (monsters with
  * `sharedAnims`) — played unretargeted, combat_melee's clips stretch it.
  * Cached per model, so a crowd of one monster type retargets once.
+ *
+ * `packPaths` overrides which pack files supply the clips. The game never
+ * passes it; tools/anim-preview does, to audition a candidate pack against
+ * every rig without overwriting the one the game ships.
  */
 export function loadSharedPackClipsForModel(
   modelPath: string,
   targetScene: THREE.Object3D,
   clipNames: string[],
-  grounding: GroundClipsOptions = {}
+  grounding: GroundClipsOptions = {},
+  packPaths: string[] = [
+    CHARACTER_ANIMATION_PACK_PATHS.locomotion,
+    CHARACTER_ANIMATION_PACK_PATHS.combatMelee,
+  ]
 ): Promise<THREE.AnimationClip[]> {
   const wanted = new Set(clipNames)
-  const cacheKey = `${modelPath}::${[...wanted].sort().join(',')}::${grounding.restClip ?? ''}:${grounding.restOffset ?? 0}`
+  const cacheKey = `${modelPath}::${[...wanted].sort().join(',')}::${grounding.restClip ?? ''}:${grounding.restOffset ?? 0}::${packPaths.join('|')}`
   const cached = sharedPackClipsByModel.get(cacheKey)
   if (cached) return cached
 
-  const clips = Promise.all([
-    loadGLB(CHARACTER_ANIMATION_PACK_PATHS.locomotion),
-    loadGLB(CHARACTER_ANIMATION_PACK_PATHS.combatMelee),
-  ])
+  const clips = Promise.all(packPaths.map((path) => loadGLB(path)))
     .then((packs) =>
       Promise.all(
         packs.map((pack) =>
