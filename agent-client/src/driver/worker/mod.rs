@@ -338,25 +338,22 @@ pub(crate) fn should_town_trip(s: &SharedState, cfg: &WorkerConfig) -> bool {
     starving && should_eat(s).is_none()
 }
 
-/// Something worth abandoning a walk for: eligible under `level_margin`, and
-/// already inside the range an attack would be accepted at.
+/// Something worth abandoning a walk for.
 ///
-/// Read by `movement::walk_waypoints` between steps. The range is the same
-/// `STRIKE_RANGE` the fighter swings from, so this only stops a walk when the
-/// very next decision really would be an attack — a monster merely visible
-/// somewhere is not worth throwing a leg away for.
+/// Read by `movement::walk_waypoints` between steps, and deliberately the
+/// same question `fighter::free_kill` answers: a leg is only thrown away when
+/// the very next decision really would be an attack. Sharing the predicate is
+/// what keeps the two in step — a walk that stopped for prey the fighter then
+/// declined to swing at would stutter in place beside it.
 pub(super) fn prey_in_reach(s: &SharedState, level_margin: u32) -> bool {
-    let Some(me) = s.self_player.as_ref().map(|p| p.position) else {
-        return false;
-    };
-    let cfg = WorkerConfig {
-        level_margin,
-        ..WorkerConfig::default()
-    };
-    s.nearby_monsters.values().any(|m| {
-        m.position.dist_xz_sq(&me) <= fighter::STRIKE_RANGE * fighter::STRIKE_RANGE
-            && fighter::is_eligible(s, &cfg, m)
-    })
+    fighter::free_kill(
+        s,
+        &WorkerConfig {
+            level_margin,
+            ..WorkerConfig::default()
+        },
+    )
+    .is_some()
 }
 
 /// Loot lying within `radius` of a point, closest to us first. The caller

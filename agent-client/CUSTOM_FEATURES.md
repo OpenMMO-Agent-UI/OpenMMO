@@ -94,6 +94,13 @@ every trip off. Zones under 20m a side are map-editor slivers, not towns, and
 are skipped. Restocking buys food from the merchant's own catalog (Wick opens
 with bread, Rica with apples) so an order is never for something unstocked.
 
+On the way out it takes what is already in reach: the ring outranks
+*chasing* the fodder, because stopping to run at every kobold pins the worker
+to the weakest ring, but something inside `STRIKE_RANGE` costs no walking at
+all, so passing it up buys nothing. `free_kill` is the same predicate the
+walk interrupt reads, and that is deliberate — a leg that stopped for prey
+the fighter then declined to swing at would stutter in place beside it.
+
 The fighter hunts on a ring, not wherever it happens to stand. Master gates
 ambient spawns by distance from the **spawn point** — a level-N type is only
 offered `(N - 1) x 70 m` out (`AMBIENT_SPAWN_METERS_PER_LEVEL`,

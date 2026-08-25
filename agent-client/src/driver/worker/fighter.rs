@@ -272,12 +272,35 @@ pub(crate) fn eligible_target(s: &SharedState, cfg: &WorkerConfig) -> Option<Str
 }
 
 fn best_eligible<'a>(s: &'a SharedState, cfg: &WorkerConfig) -> Option<&'a Monster> {
+    best_eligible_within(s, cfg, f32::INFINITY)
+}
+
+/// The one already inside striking range, if any — a kill that costs no
+/// walking at all.
+///
+/// Getting to the ring outranks the fodder underfoot, because stopping to
+/// *chase* every kobold pins the worker to the weakest ring. Something
+/// standing close enough to hit is a different question: it costs no walking,
+/// so passing it up buys nothing. It also keeps the walk interrupt honest —
+/// `abandon_leg_for` stops a leg the moment prey is in reach, and a fighter
+/// that then walked again rather than swinging would stutter in place beside
+/// a monster it refused to fight.
+pub(crate) fn free_kill(s: &SharedState, cfg: &WorkerConfig) -> Option<String> {
+    best_eligible_within(s, cfg, STRIKE_RANGE).map(|m| m.id.clone())
+}
+
+/// `best_eligible`, restricted to what stands within `range`.
+fn best_eligible_within<'a>(
+    s: &'a SharedState,
+    cfg: &WorkerConfig,
+    range: f32,
+) -> Option<&'a Monster> {
     let player = s.self_player.as_ref()?;
     let (me, my_level) = (player.position, player.level);
     let level_gap = |m: &Monster| my_level.abs_diff(monster_level(m));
     s.nearby_monsters
         .values()
-        .filter(|m| is_eligible(s, cfg, m))
+        .filter(|m| m.position.dist_xz_sq(&me) <= range * range && is_eligible(s, cfg, m))
         .min_by(|a, b| {
             level_gap(a).cmp(&level_gap(b)).then_with(|| {
                 a.position
@@ -319,7 +342,13 @@ pub(crate) fn step(
     // Anything that hits us is still fought — retaliation runs before this.
     if !town_bound {
         if let Some((x, z)) = hunt_target(s, me, player.level) {
-            return vec![Step::Walk { x, z }];
+            // Take what is already in reach on the way out. The ring still
+            // outranks chasing, so nothing here walks toward the fodder — it
+            // only swings at what the walk has already arrived beside.
+            return match free_kill(s, cfg) {
+                Some(id) => vec![Step::Attack(id)],
+                None => vec![Step::Walk { x, z }],
+            };
         }
     }
     let Some(target) = eligible_target(s, cfg).and_then(|id| s.nearby_monsters.get(&id)) else {
