@@ -81,6 +81,12 @@ the log for `trimmed conversation history to`.
 picks one (`fighter`, `fisher`, or `none` for the LLM agent) and carries its
 knobs (level margin, low-health threshold, food, potion and return-scroll
 stock, bag-full threshold).
+The trip home for food fires when the sprint goes (satiation at or under
+`NORMAL_MIN`, the threshold `should_eat` uses), not at `Weak` two thirds
+further down: waiting meant walking home from as far out as the ring goes at
+`WEAK_MOVE_MULT`, with `WEAK_CARRY_MULT` shrinking the bag on the way so the
+trip that finally fired read as a full-bag one instead.
+
 A worker ticks a small state machine over `SharedState` and runs its
 decisions through the LLM driver's own action executor, so combat,
 pathfinding, looting, trading and the spectator mirror are all reused as-is.
@@ -110,7 +116,14 @@ the strongest type, and the walk out is checked *before* target selection:
 the fodder underfoot is eligible at every level, and a level-up has to be able
 to widen the ring even while the old one still has something standing in it.
 The bearing is our own, out from the spawn point, turned until the spot is
-standable. `level_margin` deliberately does not widen the ring —
+standable — and carries the patrol's turn, so it is not one direction
+forever. Standing exactly on the spawn point reads as bearing zero (due +x)
+and a walk back down from a peak lands close enough to read the same way, so
+a single bearing had the fighter march at the same mountain, get sent home by
+`MAX_WALK_Y`, and set off at it again. Nothing in these decisions can see how
+high a spot is — `is_standable` is sync and the height sampler is not — so
+fanning the bearing out is what breaks that loop; a strand counts as a failed
+attempt for exactly this. `level_margin` deliberately does not widen the ring —
 `best_eligible` prefers our own level, so the extra walk unlocks what it then
 declines to pick.
 

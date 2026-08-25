@@ -1100,7 +1100,7 @@ fn fodder_already_in_reach_is_killed_on_the_way_out() {
     let (sx, sz) = fighter::spawn_point();
 
     // Still inside the ring, so the walk out is what would otherwise happen.
-    assert!(fighter::hunt_target(&s, s.self_player.as_ref().unwrap().position, 5).is_some());
+    assert!(fighter::hunt_target(&s, s.self_player.as_ref().unwrap().position, 5, 0).is_some());
 
     see(&mut s, monster("underfoot", "kobold", sx + 11.0, sz));
     assert_eq!(
@@ -1380,7 +1380,7 @@ fn a_level_one_fighter_is_given_somewhere_to_walk() {
     let me = s.self_player.as_ref().unwrap().position;
 
     assert_eq!(fighter::hunt_radius(1), 0.0);
-    assert_eq!(fighter::hunt_target(&s, me, 1), None);
+    assert_eq!(fighter::hunt_target(&s, me, 1, 0), None);
 
     assert!(
         matches!(
@@ -1547,4 +1547,76 @@ async fn a_town_errand_never_inherits_the_hunting_arm() {
         None,
         "the errand's own walk must not be interruptible"
     );
+}
+
+/// Out of food, the trip home fires when the sprint goes — not two thirds
+/// further down at `Weak`. Waiting for `Weak` meant starting the walk from as
+/// far out as the ring goes at `WEAK_MOVE_MULT`, and `WEAK_CARRY_MULT` shrinks
+/// the bag on the way, so the trip that did fire often read as a full-bag one.
+#[test]
+fn an_empty_larder_sends_the_worker_home_when_the_sprint_goes() {
+    let mut s = state_at(0.0, 0.0);
+    s.self_hunger = Some((900, HungerState::Normal));
+    assert!(!should_town_trip(&s, &cfg()), "well fed, nothing to do");
+
+    // One point past the sprint threshold, which is where `should_eat` acts.
+    s.self_hunger = Some((onlinerpg_shared::hunger::NORMAL_MIN, HungerState::Hungry));
+    assert!(
+        should_town_trip(&s, &cfg()),
+        "hungry with an empty bag is the trip, without waiting for Weak"
+    );
+
+    // Carrying food, it eats instead of walking home.
+    bag(&mut s, "bread", 1);
+    assert!(should_eat(&s).is_some());
+    assert!(
+        !should_town_trip(&s, &cfg()),
+        "food in the bag answers hunger without a trip"
+    );
+}
+
+/// Standing on the spawn point reads as bearing zero — due +x — and the walk
+/// back down from a peak lands close enough to read the same way. With one
+/// bearing the fighter marched at the same mountain, was sent home by
+/// `MAX_WALK_Y`, and set off at it again. Nothing here can see how high a
+/// spot is, so fanning the bearing out is what breaks the loop.
+#[test]
+fn the_ring_walk_does_not_set_off_in_the_same_direction_every_time() {
+    let (sx, sz) = fighter::spawn_point();
+    let mut s = state_at(sx, sz);
+    s.self_player.as_mut().unwrap().level = 5;
+    let me = s.self_player.as_ref().unwrap().position;
+
+    let first = fighter::hunt_target(&s, me, 5, 0).expect("a ring point");
+    let second = fighter::hunt_target(&s, me, 5, 1).expect("another ring point");
+
+    assert_ne!(first, second, "one bearing forever is the mountain loop");
+    // Both still land on the ring; only the direction changed.
+    for (x, z) in [first, second] {
+        assert!((from_spawn(x, z) - (280.0 + 20.0)).abs() < 0.5);
+    }
+}
+
+/// Getting stranded is the signal that the last bearing walked into a
+/// mountain, so it counts as a failed attempt: the ring walk after the climb
+/// down sets off somewhere else.
+#[test]
+fn a_strand_turns_the_next_ring_walk_away_from_the_mountain() {
+    let (sx, sz) = fighter::spawn_point();
+    let mut s = state_at(sx, sz);
+    s.self_player.as_mut().unwrap().level = 5;
+    s.self_player.as_mut().unwrap().position.y = fighter::MAX_WALK_Y + 5.0;
+
+    let mut patrol = fighter::Patrol::default();
+    assert_eq!(
+        fighter::step(&s, &cfg(), false, &mut patrol),
+        vec![Step::Walk { x: sx, z: sz }],
+        "stranded: head back down"
+    );
+
+    // Back down at the spawn point, the ring walk must not retrace it.
+    s.self_player.as_mut().unwrap().position.y = 0.0;
+    let after = fighter::step(&s, &cfg(), false, &mut patrol);
+    let virgin = fighter::step(&s, &cfg(), false, &mut fighter::Patrol::default());
+    assert_ne!(after, virgin, "the strand has to change where it sets off");
 }
