@@ -52,12 +52,14 @@ fn fight(delta_ms: f32, seconds: f32) -> (usize, f32) {
         let SharedState {
             ref self_player,
             ref nearby_players,
+            ref nearby_monsters,
             ref mut monster_ai,
             ..
         } = s;
         for cmd in monster_ai.tick_all(
             delta_ms,
             nearby_players,
+            nearby_monsters,
             self_player.as_ref(),
             self_pass_floor,
             world.passability_cache(),
