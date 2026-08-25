@@ -1048,13 +1048,21 @@ fn the_ring_is_where_our_own_level_spawns_and_stops_at_the_strongest() {
 }
 
 #[test]
-fn the_fighter_walks_out_to_its_ring_past_the_fodder_underfoot() {
+fn the_fighter_walks_out_to_its_ring_past_fodder_it_would_have_to_chase() {
     let mut s = state_out_from_spawn(10.0);
     s.self_player.as_mut().unwrap().level = 5;
-    // Eligible, adjacent, and exactly the trap: stopping for it is what keeps
-    // a worker in the weakest ring.
+    // Eligible but out of reach, and exactly the trap: chasing this is what
+    // keeps a worker pinned to the weakest ring.
     let (sx, sz) = fighter::spawn_point();
-    see(&mut s, monster("kobold-1", "kobold", sx + 11.0, sz));
+    see(
+        &mut s,
+        monster(
+            "kobold-1",
+            "kobold",
+            sx + 10.0 + fighter::STRIKE_RANGE + 5.0,
+            sz,
+        ),
+    );
 
     let [Step::Walk { x, z }] =
         fighter::step(&s, &cfg(), false, &mut fighter::Patrol::default()).as_slice()[..]
@@ -1077,6 +1085,47 @@ fn the_fighter_walks_out_to_its_ring_past_the_fodder_underfoot() {
     assert_eq!(
         fighter::step(&there, &cfg(), false, &mut fighter::Patrol::default()),
         vec![Step::Attack("kobold-1".to_string())]
+    );
+}
+
+/// The ring outranks *chasing* the fodder, not swinging at it. Something
+/// already inside striking range costs no walking, so walking past it buys
+/// nothing — and it is what keeps the walk interrupt from stuttering: the
+/// interrupt stops a leg the moment prey is in reach, so a fighter that then
+/// walked again rather than attacking would grind in place beside it.
+#[test]
+fn fodder_already_in_reach_is_killed_on_the_way_out() {
+    let mut s = state_out_from_spawn(10.0);
+    s.self_player.as_mut().unwrap().level = 5;
+    let (sx, sz) = fighter::spawn_point();
+
+    // Still inside the ring, so the walk out is what would otherwise happen.
+    assert!(fighter::hunt_target(&s, s.self_player.as_ref().unwrap().position, 5).is_some());
+
+    see(&mut s, monster("underfoot", "kobold", sx + 11.0, sz));
+    assert_eq!(
+        fighter::step(&s, &cfg(), false, &mut fighter::Patrol::default()),
+        vec![Step::Attack("underfoot".to_string())]
+    );
+    // Which is exactly what the walk interrupt stops the leg for.
+    assert!(prey_in_reach(&s, cfg().level_margin));
+}
+
+/// `town_bound` suppresses the walk out to the ring, not the swing: a
+/// fighter waiting out a town-trip retry still kills what is standing on it.
+/// The walk interrupt is what stays disarmed for a town run — a leg walked to
+/// reach a merchant must not be abandoned every time something wanders past.
+#[test]
+fn a_town_bound_fighter_still_swings_at_what_is_on_top_of_it() {
+    let mut s = state_out_from_spawn(10.0);
+    s.self_player.as_mut().unwrap().level = 5;
+    let (sx, sz) = fighter::spawn_point();
+    see(&mut s, monster("underfoot", "kobold", sx + 11.0, sz));
+
+    assert_eq!(
+        fighter::step(&s, &cfg(), true, &mut fighter::Patrol::default()),
+        vec![Step::Attack("underfoot".to_string())],
+        "the errand stops the walk out, not the fight in front of it"
     );
 }
 
