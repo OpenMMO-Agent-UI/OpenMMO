@@ -327,6 +327,14 @@ pub struct SharedState {
     /// Terrain regions whose zone file has already been fetched, so moving
     /// around a town does not re-ask for it on every chunk crossing.
     pub fetched_zone_regions: HashSet<(i32, i32)>,
+    /// Set by a worker while it walks a leg it is willing to give up, holding
+    /// the level margin its eligibility test uses. A walk otherwise runs to
+    /// its waypoint no matter what appears — and the server spawns ambient
+    /// monsters about 20 m ahead of a walker, inside a ±30° cone off the
+    /// heading, so the thing worth fighting lands squarely in the stretch the
+    /// fighter is not looking at. `None` for the LLM driver, whose walks are
+    /// unchanged.
+    pub abandon_leg_for: Option<u32>,
     /// Spectator panel handle; feeds it chat/combat/system lines
     watch: Option<Arc<crate::watch::NpcWatch>>,
     /// Running follow loop: (target name, task handle). Anything that takes
@@ -414,6 +422,7 @@ impl SharedState {
             pending_commands: Vec::new(),
             no_spawn_zones: Vec::new(),
             fetched_zone_regions: HashSet::new(),
+            abandon_leg_for: None,
             watch,
             follow_task: None,
             wake_urgency: EventUrgency::Noise,

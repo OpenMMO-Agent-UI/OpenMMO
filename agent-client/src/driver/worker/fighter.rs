@@ -258,7 +258,7 @@ pub(crate) fn patrol_target(
 /// How close the target must be before we swing. The chase itself gives up
 /// past 20 m (`MAX_CHASE_DISTANCE` in combat.rs), so an attack ordered from
 /// further out is refused before a single step is taken — walk first.
-const STRIKE_RANGE: f32 = 15.0;
+pub(super) const STRIKE_RANGE: f32 = 15.0;
 /// Where to stop when closing on a distant target: inside striking range,
 /// not on top of it.
 const CLOSE_TO: f32 = 8.0;

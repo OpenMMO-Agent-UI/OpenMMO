@@ -1450,6 +1450,14 @@ pub(super) async fn handle_response(
                                      shut door stands in the way. Try a different goal."
                                 ));
                             }
+                            MoveResult::Interrupted => {
+                                info!("Walk to ({gx:.1}, {gz:.1}) gave way to a fight");
+                                let mut s = state.lock().await;
+                                s.push_agent_event(format!(
+                                    "[MoveInterrupted] You stopped short of \
+                                     ({gx:.1}, {gz:.1}) — something worth fighting is here."
+                                ));
+                            }
                             MoveResult::Error => {
                                 error!("Move error to ({gx:.1}, {gz:.1})");
                                 let mut s = state.lock().await;
@@ -1757,6 +1765,18 @@ async fn move_to_dungeon_floor(
             s.push_agent_event(format!(
                 "[MoveFailed] You could not get to floor {depth} of {} — the way is \
                  sealed. Try a floor closer to where you are.",
+                dungeon.name
+            ));
+        }
+        MoveResult::Interrupted => {
+            info!(
+                "Descent to {} floor {depth} gave way to a fight",
+                dungeon.name
+            );
+            let mut s = state.lock().await;
+            s.push_agent_event(format!(
+                "[MoveInterrupted] You stopped short of floor {depth} of {} — something \
+                 worth fighting is here.",
                 dungeon.name
             ));
         }

@@ -1341,3 +1341,98 @@ fn a_level_one_fighter_is_given_somewhere_to_walk() {
         "a level-1 fighter must still be given a direction"
     );
 }
+
+/// A walk runs to its waypoint no matter what appears, and the server drops
+/// ambient spawns about 20 m ahead of a walker inside a ±30° cone off the
+/// heading — so the monster worth fighting lands squarely in the stretch the
+/// fighter is not looking at. `prey_in_reach` is what lets a leg give way.
+#[test]
+fn a_walk_gives_way_only_to_something_actually_worth_swinging_at() {
+    let mut s = state_at(0.0, 0.0);
+    assert!(!prey_in_reach(&s, 0), "empty ground stops nothing");
+
+    // Beyond the strike range the chase would be refused anyway, so it is not
+    // worth throwing a leg away for.
+    see(
+        &mut s,
+        monster("far", "kobold", 0.0, fighter::STRIKE_RANGE + 5.0),
+    );
+    assert!(!prey_in_reach(&s, 0));
+
+    see(&mut s, monster("near", "kobold", 0.0, 5.0));
+    assert!(prey_in_reach(&s, 0));
+}
+
+/// The margin is the whole point of the flag carrying a number: a monster the
+/// fighter would decline to fight must not keep stopping its legs.
+#[test]
+fn a_walk_does_not_give_way_to_a_monster_out_of_our_league() {
+    let mut s = state_at(0.0, 0.0);
+    s.self_player.as_mut().unwrap().level = 1;
+    let mut ogre = monster("ogre", "ogre", 0.0, 5.0);
+    ogre.level_override = Some(9);
+    see(&mut s, ogre);
+
+    assert!(!prey_in_reach(&s, 0), "out of our league at margin 0");
+    assert!(prey_in_reach(&s, 8), "in range once the margin allows it");
+}
+
+/// Armed for a leg walked to find a fight, disarmed for one walked to reach a
+/// merchant: abandoning the town run every time something wanders past is how
+/// a town trip never finishes.
+#[tokio::test]
+async fn the_walk_interrupt_is_armed_for_hunting_and_not_for_shopping() {
+    let mut s = state_at(0.0, 0.0);
+    for _ in 0..40 {
+        bag(&mut s, "iron_helmet", 1);
+    }
+    assert!(
+        should_town_trip(&s, &cfg()),
+        "the bag is what sends it to town"
+    );
+
+    let labels = labels::BagLabels {
+        sellable: vec!["iron_helmet".to_string()],
+        dropable: Vec::new(),
+    };
+    let state = std::sync::Arc::new(tokio::sync::Mutex::new(s));
+    let mut errand = Errand::Work;
+    let (mut loot_at, mut blocked, mut stop) = (None, None, 0usize);
+    let mut patrol = fighter::Patrol::default();
+
+    let _ = next_step(
+        &state,
+        &cfg(),
+        &mut errand,
+        &mut loot_at,
+        &mut blocked,
+        &mut stop,
+        "test",
+        &labels,
+        &mut patrol,
+    )
+    .await;
+    assert_eq!(
+        state.lock().await.abandon_leg_for,
+        None,
+        "a town-bound leg must not be abandoned for a passing monster"
+    );
+
+    // Empty the bag: nothing sends it to town any more, so it is hunting.
+    state.lock().await.self_bag.clear();
+    errand = Errand::Work;
+    blocked = None;
+    let _ = next_step(
+        &state,
+        &cfg(),
+        &mut errand,
+        &mut loot_at,
+        &mut blocked,
+        &mut stop,
+        "test",
+        &labels,
+        &mut patrol,
+    )
+    .await;
+    assert_eq!(state.lock().await.abandon_leg_for, Some(cfg().level_margin));
+}
