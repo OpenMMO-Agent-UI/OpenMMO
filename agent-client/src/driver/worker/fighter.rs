@@ -86,14 +86,26 @@ fn is_standable(s: &SharedState, x: f32, z: f32) -> bool {
 /// is a floor, not a band, so a chase that drifted further is left alone.
 /// Keeps our current bearing from the spawn point, turning it when the spot
 /// it lands on is not standable.
-pub(crate) fn hunt_target(s: &SharedState, me: Position, my_level: u32) -> Option<(f32, f32)> {
+pub(crate) fn hunt_target(
+    s: &SharedState,
+    me: Position,
+    my_level: u32,
+    turn: u32,
+) -> Option<(f32, f32)> {
     let (sx, sz) = spawn_point();
     let radius = hunt_radius(my_level);
     let (dx, dz) = (me.x - sx, me.z - sz);
     if dx.hypot(dz) >= radius {
         return None;
     }
-    // On the spawn point itself there is no bearing to keep; the retry picks one.
+    // On the spawn point itself there is no bearing to keep, and `turn` is
+    // what stops that becoming one direction forever. Standing exactly there
+    // reads as bearing zero — due +x — and a walk back from a peak lands
+    // close enough to it to read the same way, so the fighter marched at the
+    // same mountain, was sent home by `MAX_WALK_Y`, and set off at it again.
+    // Nothing here can see how high a spot is (`is_standable` is sync and the
+    // height sampler is not), so fanning the bearing out is what breaks the
+    // loop.
     let bearing = if dx.hypot(dz) > f32::EPSILON {
         dz.atan2(dx)
     } else {
@@ -103,8 +115,8 @@ pub(crate) fn hunt_target(s: &SharedState, me: Position, my_level: u32) -> Optio
     // and the next chase's drift drops us back under it.
     let want = radius + ESCAPE_SLACK;
     let step = std::f32::consts::TAU / BEARING_TRIES as f32;
-    (0..BEARING_TRIES).find_map(|turn| {
-        let angle = bearing + turn as f32 * step;
+    (0..BEARING_TRIES).find_map(|n| {
+        let angle = bearing + (n + turn % BEARING_TRIES) as f32 * step;
         let (x, z) = (sx + angle.cos() * want, sz + angle.sin() * want);
         is_standable(s, x, z).then_some((x, z))
     })
@@ -191,6 +203,14 @@ impl Patrol {
     /// left us where we were did not: the target was standable but
     /// unreachable (across a river, up a cliff), and reaching further round
     /// the arc is the only way past it.
+    /// A bearing that ended above `MAX_WALK_Y` is a bearing not to repeat.
+    /// Shares the counter with a stalled leg because the remedy is the same:
+    /// try somewhere else round the ring.
+    fn stranded(&mut self) {
+        self.turn = self.turn.wrapping_add(1);
+        self.from = None;
+    }
+
     fn advance(&mut self, me: Position) {
         let stalled = self
             .from
@@ -338,6 +358,10 @@ pub(crate) fn step(
         if let Some(id) = free_kill(s, cfg) {
             return vec![Step::Attack(id)];
         }
+        // Being up here at all means the last bearing walked into a mountain.
+        // Count it, so the ring walk that follows the climb down sets off in
+        // a different direction instead of straight back up.
+        patrol.stranded();
         let (x, z) = spawn_point();
         return vec![Step::Walk { x, z }];
     }
@@ -347,7 +371,7 @@ pub(crate) fn step(
     // radius: the old ring always has something eligible standing in it.
     // Anything that hits us is still fought — retaliation runs before this.
     if !town_bound {
-        if let Some((x, z)) = hunt_target(s, me, player.level) {
+        if let Some((x, z)) = hunt_target(s, me, player.level, patrol.turn) {
             // Take what is already in reach on the way out. The ring still
             // outranks chasing, so nothing here walks toward the fodder — it
             // only swings at what the walk has already arrived beside.

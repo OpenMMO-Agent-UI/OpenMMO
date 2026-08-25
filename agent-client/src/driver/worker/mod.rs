@@ -14,7 +14,6 @@ mod labels;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use onlinerpg_shared::hunger::HungerState;
 use onlinerpg_shared::{Position, ServerMessage};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -334,8 +333,17 @@ pub(crate) fn should_town_trip(s: &SharedState, cfg: &WorkerConfig) -> bool {
     if bag_load_pct(s) >= cfg.bag_full_pct {
         return true;
     }
-    let starving = s.self_hunger.is_some_and(|(_, b)| b == HungerState::Weak);
-    starving && should_eat(s).is_none()
+    // Out of food and already past the point where the run is gone — not
+    // `Weak`, which is two thirds of the way further down. Waiting for that
+    // meant starting the walk home from as far out as the ring goes at
+    // `WEAK_MOVE_MULT` (0.75x), and `WEAK_CARRY_MULT` shrinks the bag on the
+    // way, so the trip that finally fired often read as a full-bag trip
+    // instead. `should_eat` uses the same threshold for the same reason:
+    // losing the sprint is the first thing a worker actually feels.
+    let hungry = s
+        .self_hunger
+        .is_some_and(|(satiation, _)| satiation <= onlinerpg_shared::hunger::NORMAL_MIN);
+    hungry && should_eat(s).is_none()
 }
 
 /// Something worth abandoning a walk for.
