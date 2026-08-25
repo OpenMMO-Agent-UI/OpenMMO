@@ -1485,3 +1485,66 @@ async fn the_walk_interrupt_is_armed_for_hunting_and_not_for_shopping() {
     .await;
     assert_eq!(state.lock().await.abandon_leg_for, Some(cfg().level_margin));
 }
+
+/// Stranded above `MAX_WALK_Y` the fighter walks back down to the spawn
+/// point — and that leg is armed like any other, so an eligible monster in
+/// reach would interrupt it on every tick and it would never get down. Free
+/// kills come first here for the same reason they do on the way to the ring.
+#[test]
+fn a_stranded_fighter_kills_what_is_in_reach_before_climbing_down() {
+    let mut s = state_at(0.0, 0.0);
+    s.self_player.as_mut().unwrap().position.y = fighter::MAX_WALK_Y + 5.0;
+
+    let (sx, sz) = fighter::spawn_point();
+    assert_eq!(
+        fighter::step(&s, &cfg(), false, &mut fighter::Patrol::default()),
+        vec![Step::Walk { x: sx, z: sz }],
+        "nothing in reach: head back down"
+    );
+
+    // Down at a height it would fight at, and within reach.
+    see(&mut s, monster("underfoot", "kobold", 3.0, 0.0));
+    assert_eq!(
+        fighter::step(&s, &cfg(), false, &mut fighter::Patrol::default()),
+        vec![Step::Attack("underfoot".to_string())]
+    );
+}
+
+/// `next_step` can return before it ever reaches the worker's own decision —
+/// the town errand and the loot sweep both do. The arming has to be cleared
+/// up front, or a leg walked to reach a merchant inherits it from the tick
+/// that was hunting and gets abandoned for the first monster that wanders by.
+#[tokio::test]
+async fn a_town_errand_never_inherits_the_hunting_arm() {
+    let mut s = state_at(0.0, 0.0);
+    // Armed by an earlier hunting tick.
+    s.abandon_leg_for = Some(0);
+
+    let state = std::sync::Arc::new(tokio::sync::Mutex::new(s));
+    // Mid-errand with no town and no merchant to find: an early return.
+    let mut errand = Errand::ToTown;
+    let (mut loot_at, mut blocked, mut stop) = (None, None, 0usize);
+    let labels = labels::BagLabels {
+        sellable: Vec::new(),
+        dropable: Vec::new(),
+    };
+
+    let _ = next_step(
+        &state,
+        &cfg(),
+        &mut errand,
+        &mut loot_at,
+        &mut blocked,
+        &mut stop,
+        "test",
+        &labels,
+        &mut fighter::Patrol::default(),
+    )
+    .await;
+
+    assert_eq!(
+        state.lock().await.abandon_leg_for,
+        None,
+        "the errand's own walk must not be interruptible"
+    );
+}

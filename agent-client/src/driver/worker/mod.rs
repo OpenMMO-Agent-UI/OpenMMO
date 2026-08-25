@@ -655,6 +655,11 @@ async fn next_step(
     patrol: &mut fighter::Patrol,
 ) -> Vec<Step> {
     let mut s = state.lock().await;
+    // Cleared before any decision is taken. Everything below this can return
+    // early — the town errand, the loot sweep — and a leg walked to reach a
+    // merchant must not inherit the arming from the tick that was hunting.
+    // Only the fighter's own hunting legs re-arm it.
+    s.abandon_leg_for = None;
     let waiting_out_a_failed_trip = town_blocked_until.is_some_and(|t| Instant::now() < t);
     if *errand == Errand::Work && !waiting_out_a_failed_trip && should_town_trip(&s, cfg) {
         let load = bag_load_pct(&s);
