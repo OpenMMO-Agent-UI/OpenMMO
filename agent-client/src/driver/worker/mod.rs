@@ -338,6 +338,27 @@ pub(crate) fn should_town_trip(s: &SharedState, cfg: &WorkerConfig) -> bool {
     starving && should_eat(s).is_none()
 }
 
+/// Something worth abandoning a walk for: eligible under `level_margin`, and
+/// already inside the range an attack would be accepted at.
+///
+/// Read by `movement::walk_waypoints` between steps. The range is the same
+/// `STRIKE_RANGE` the fighter swings from, so this only stops a walk when the
+/// very next decision really would be an attack — a monster merely visible
+/// somewhere is not worth throwing a leg away for.
+pub(super) fn prey_in_reach(s: &SharedState, level_margin: u32) -> bool {
+    let Some(me) = s.self_player.as_ref().map(|p| p.position) else {
+        return false;
+    };
+    let cfg = WorkerConfig {
+        level_margin,
+        ..WorkerConfig::default()
+    };
+    s.nearby_monsters.values().any(|m| {
+        m.position.dist_xz_sq(&me) <= fighter::STRIKE_RANGE * fighter::STRIKE_RANGE
+            && fighter::is_eligible(s, &cfg, m)
+    })
+}
+
 /// Loot lying within `radius` of a point, closest to us first. The caller
 /// passes the kill site, so a distant pile never pulls the worker off course.
 pub(crate) fn loot_candidates(s: &SharedState, near: Position, radius: f32) -> Vec<u64> {
@@ -636,7 +657,7 @@ async fn next_step(
     labels: &labels::BagLabels,
     patrol: &mut fighter::Patrol,
 ) -> Vec<Step> {
-    let s = state.lock().await;
+    let mut s = state.lock().await;
     let waiting_out_a_failed_trip = town_blocked_until.is_some_and(|t| Instant::now() < t);
     if *errand == Errand::Work && !waiting_out_a_failed_trip && should_town_trip(&s, cfg) {
         let load = bag_load_pct(&s);
@@ -716,7 +737,16 @@ async fn next_step(
     }
 
     match cfg.kind {
-        WorkerKind::Fighter => fighter::step(&s, cfg, should_town_trip(&s, cfg), patrol),
+        WorkerKind::Fighter => {
+            let town_bound = should_town_trip(&s, cfg);
+            // Arm the walk interrupt for everything except a town run. A leg
+            // walked to find a fight is worth dropping the moment one turns
+            // up; a leg walked to reach a merchant is not — abandoning that
+            // one every time something wanders past is how a town trip never
+            // finishes.
+            s.abandon_leg_for = (!town_bound).then_some(cfg.level_margin);
+            fighter::step(&s, cfg, town_bound, patrol)
+        }
         WorkerKind::Fisher => {
             let job = fisher::water_job(&s);
             drop(s);

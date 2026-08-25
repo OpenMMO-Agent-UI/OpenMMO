@@ -122,6 +122,17 @@ moved us resets the arc offset, so every working leg is the same length,
 while one that left us standing — standable target, unreachable ground —
 reaches further round instead of being reissued unchanged.
 
+A leg gives way to a fight. `execute_move` runs to its waypoint whatever
+turns up — the only early exits are a server position correction and a send
+error — and the server drops ambient spawns about 20 m ahead of a walker
+inside a ±30° cone off the heading, so the monster worth fighting lands
+squarely in the stretch the fighter is not looking at. `SharedState::
+abandon_leg_for` carries the level margin while a hunting leg is walking;
+`walk_waypoints` checks `prey_in_reach` between steps and returns
+`MoveResult::Interrupted`, and the next tick attacks. It is armed for hunting
+legs only — abandoning a town run every time something wanders past is how a
+town trip never finishes.
+
 A full bag reads a return scroll home rather than walking, keeping the last
 one for the low-health escape — the scroll lands on the spawn point, which is
 both where town is and where the ring is measured from. Supply carried past
@@ -156,7 +167,9 @@ shared survival/town decisions, plus `fighter.rs`, `fisher.rs`, `labels.rs`,
 (`no_spawn_zones` and `fetched_zone_regions` — wholly ours since v37, not a
 `pub` on an upstream field any more), `driver/movement.rs`
 (`RegionZones` + `fetch_no_spawn_zones_around`, modelled on
-`fetch_furniture_around` right above it), and `item_defs.rs` (`ItemDef::weight`, for the bag-full check against the
+`fetch_furniture_around` right above it, plus the `abandon_leg_for` check in
+`walk_waypoints` and the `MoveResult::Interrupted` arms its callers grew),
+and `item_defs.rs` (`ItemDef::weight`, for the bag-full check against the
 server's STR×15 carry cap). `fighter.rs` also reads `data-src/world.json`
 directly for `spawnPosition` — the tracked source file, not the gitignored
 `data/` output the monster levels come from.

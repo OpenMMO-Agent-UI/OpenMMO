@@ -77,6 +77,10 @@ pub(super) enum MoveResult {
     Arrived,
     Blocked,
     Error,
+    /// Given up part-way because something worth fighting turned up. Only a
+    /// worker asks for this (`SharedState::abandon_leg_for`); the caller is
+    /// expected to re-decide rather than treat it as a failure.
+    Interrupted,
 }
 
 /// Which schedule entry is due at the current game time.
@@ -158,6 +162,9 @@ async fn execute_schedule_move(state: &Arc<Mutex<SharedState>>, entry: &Schedule
             MoveResult::Blocked => {
                 warn!("Patrol waypoint {i} blocked — skipping ({wx:.1}, {wz:.1})");
             }
+            MoveResult::Interrupted => {
+                warn!("Patrol waypoint {i} interrupted — skipping ({wx:.1}, {wz:.1})");
+            }
             MoveResult::Error => {
                 error!("Patrol waypoint {i} error");
             }
@@ -195,6 +202,14 @@ async fn execute_schedule_move(state: &Arc<Mutex<SharedState>>, entry: &Schedule
                 entry.floor_level
             );
             true
+        }
+        MoveResult::Interrupted => {
+            // Only a worker arms the walk interrupt and a worker has no
+            // schedule, so this does not happen today. Degrading rather than
+            // asserting keeps a future caller that does arm it from wedging
+            // an NPC's whole day on a panic.
+            warn!("Schedule move interrupted");
+            false
         }
         MoveResult::Error => {
             error!("Schedule move error");
@@ -371,6 +386,16 @@ async fn walk_waypoints(
                 if s.position_corrections != corrections {
                     warn!("Path abandoned after a position correction");
                     return MoveResult::Blocked;
+                }
+                // Checked here, between steps, because this loop is the only
+                // place a long walk is interruptible at all: a leg otherwise
+                // runs to its waypoint however good the thing that spawned in
+                // front of it. The lock is already held and the check is a
+                // scan of what is nearby, so it costs nothing worth counting.
+                if let Some(margin) = s.abandon_leg_for {
+                    if super::worker::prey_in_reach(&s, margin) {
+                        return MoveResult::Interrupted;
+                    }
                 }
                 let player = match &s.self_player {
                     Some(p) => p,
