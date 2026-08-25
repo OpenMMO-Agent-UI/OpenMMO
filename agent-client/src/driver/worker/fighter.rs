@@ -332,6 +332,12 @@ pub(crate) fn step(
     // fighter would stay on the peak forever. The spawn point is the one low
     // spot we know without sampling the heightmap.
     if me.y > MAX_WALK_Y {
+        // Same rule as the walk out to the ring: something already in reach
+        // is free, and the descent would otherwise be interrupted for it on
+        // every tick and never get anywhere.
+        if let Some(id) = free_kill(s, cfg) {
+            return vec![Step::Attack(id)];
+        }
         let (x, z) = spawn_point();
         return vec![Step::Walk { x, z }];
     }
