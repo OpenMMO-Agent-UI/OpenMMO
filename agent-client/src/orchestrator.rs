@@ -674,10 +674,9 @@ impl NpcConfig {
     }
 }
 
-/// How often the monster brains are simulated. Fine enough that an owned
-/// monster chases and swings like one driven by a web client, which ticks its
-/// brains every animation frame; `monster_ai_tests` holds it to that.
-pub(crate) const AI_TICK: Duration = Duration::from_millis(50);
+/// How often the monster brains are simulated. Match the web client's
+/// animation-frame brain cadence so throttled syncs stay smooth.
+pub(crate) const AI_TICK: Duration = Duration::from_millis(16);
 
 /// Ceiling on stat rolls at character creation. A backstop against a prompt
 /// that never says yes — how picky to be is the agent's own business, and

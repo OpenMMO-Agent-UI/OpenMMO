@@ -89,7 +89,6 @@ export const shieldGlowLit = derived(
     (underground || time?.isNight === true)
 )
 
-
 /** The local player's first revive item (phoenix talisman), offered on the
  *  death dialog together with its def. */
 export const reviveItem = derived(inventoryStore, (inv) => {

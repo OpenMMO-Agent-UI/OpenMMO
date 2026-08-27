@@ -69,7 +69,8 @@
   /// once the real position arrives — keeps frame times over the threshold
   /// that dismisses the loading dialog. Wait for the character instead.
   let sceneCanMount = $derived(
-    (!isObserver && !manualBootstrap) || spectatorHasEnteredWorld(currentPlayerHp)
+    (!isObserver && !manualBootstrap) ||
+      spectatorHasEnteredWorld(currentPlayerHp)
   )
   let currentPlayerLevel = $state<number | null>(null)
   let currentPlayerTotalXp = $state<number | null>(null)
