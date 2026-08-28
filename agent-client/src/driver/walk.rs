@@ -253,6 +253,10 @@ pub(super) enum LostReason {
     LockedDoor,
     /// The server kept refusing our steps: its layout disagrees with ours.
     Desynced,
+    /// Given up part-way because something worth fighting turned up. Only a
+    /// worker asks for this (`SharedState::abandon_leg_for`); the caller is
+    /// expected to re-decide rather than treat it as a failure.
+    PreyInReach,
 }
 
 impl LostReason {
@@ -268,6 +272,7 @@ impl LostReason {
                 "the way on is a locked door and you hold no key for it".to_string()
             }
             Self::Desynced => "the ground kept refusing your steps".to_string(),
+            Self::PreyInReach => "something worth fighting is here".to_string(),
         }
     }
 }
@@ -315,6 +320,16 @@ pub(super) async fn walk(
             let Some(me) = s.self_player.as_ref().filter(|p| p.health > 0) else {
                 return Walked::Lost(LostReason::PlayerDied);
             };
+            // Checked here, between steps, because this loop is the only place
+            // a long walk is interruptible at all: a leg otherwise runs to its
+            // waypoint however good the thing that spawned in front of it, and
+            // the server drops ambient spawns about 20m ahead of a walker. The
+            // lock is already held and the check is a scan of what is nearby.
+            if let Some(margin) = s.abandon_leg_for {
+                if super::worker::prey_in_reach(&s, margin) {
+                    return Walked::Lost(LostReason::PreyInReach);
+                }
+            }
             let to_target = PlanarDelta::between(&me.position, &target_pos);
             let target_floor = to.floor(&s);
             let arrived = to_target.dist <= tuning.arrive_range
