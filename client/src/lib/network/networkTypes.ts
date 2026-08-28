@@ -137,6 +137,7 @@ export type ClientMessage =
         gender: Gender
       }
     }
+  | { RenameCharacter: { character_id: number; new_name: string } }
   | { DeleteCharacter: { character_id: number } }
   | { RenameCharacter: { character_id: number; new_name: string } }
   | { RollCharacterStats: { character_class: CharacterClass; gender: Gender } }
