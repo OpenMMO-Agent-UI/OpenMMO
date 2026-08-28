@@ -23,8 +23,10 @@ mod movement;
 mod outcome;
 mod prompt;
 mod walk;
+mod worker;
 
 pub(crate) use prompt::format_event;
+pub use worker::{worker_driver, WorkerConfig, WorkerKind};
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
