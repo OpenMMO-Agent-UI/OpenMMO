@@ -647,7 +647,7 @@ async fn an_unmarked_full_bag_writes_the_town_trip_off_and_leaves() {
         "trip written off, so leave the town it cannot use"
     );
     assert!(
-        blocked.is_some_and(|t| t > Instant::now()),
+        blocked.is_some_and(|p| p.until > Instant::now()),
         "and do not retry it for a while"
     );
     let s = state.lock().await;
@@ -685,7 +685,10 @@ async fn a_blocked_trip_must_not_turn_a_full_bag_round_at_the_boundary() {
     let mut errand = Errand::Work;
     let mut loot_at = None;
     // A visit a moment ago (TOWN_VISIT_DELAY) is still on the clock.
-    let mut blocked = Some(Instant::now() + Duration::from_secs(30));
+    let mut blocked = Some(TownPause {
+        until: Instant::now() + Duration::from_secs(30),
+        useless: false,
+    });
     let mut stop = 0usize;
     let steps = next_step(
         &state,
@@ -1614,5 +1617,72 @@ fn a_leg_that_landed_carries_its_heading_into_the_next_one() {
     assert!(
         (first - second).abs() < 0.01,
         "the heading changed on a leg that landed: {first} -> {second}"
+    );
+}
+
+/// A town that could not help has already answered. Staying town-bound
+/// through its retry clock stops the fighter for five minutes, then another
+/// five, for as long as the thing it could not fix stays true — and hunger
+/// reaching that trigger at `NORMAL_MIN` rather than `Weak` made it somewhere
+/// a fighter actually ends up. The verdict pause has to read differently from
+/// the breather after a visit that did some business.
+#[tokio::test]
+async fn a_town_that_cannot_help_does_not_keep_the_fighter_standing() {
+    let mut s = state_out_of_circle();
+    // Hungry with an empty larder: exactly what a town cannot fix without gold.
+    s.self_hunger = Some((onlinerpg_shared::hunger::NORMAL_MIN, HungerState::Hungry));
+    assert!(should_town_trip(&s, &cfg()), "the hunger wants a town trip");
+
+    let labels = labels::BagLabels {
+        sellable: Vec::new(),
+        dropable: Vec::new(),
+    };
+    let state = std::sync::Arc::new(tokio::sync::Mutex::new(s));
+    let (mut errand, mut loot_at, mut stop) = (Errand::Work, None, 0usize);
+    let mut patrol = fighter::Patrol::default();
+
+    // The town said no a moment ago and is on its retry clock.
+    let mut blocked = Some(TownPause {
+        until: Instant::now() + Duration::from_secs(300),
+        useless: true,
+    });
+    let steps = next_step(
+        &state,
+        &cfg(),
+        &mut errand,
+        &mut loot_at,
+        &mut blocked,
+        &mut stop,
+        "test",
+        &labels,
+        &mut patrol,
+    )
+    .await;
+    assert!(
+        matches!(steps.as_slice(), [Step::Walk { .. }]),
+        "should be back at work, not waiting the town out: {steps:?}"
+    );
+
+    // A breather after a trip that *did* do business still holds it.
+    let mut breather = Some(TownPause {
+        until: Instant::now() + Duration::from_secs(30),
+        useless: false,
+    });
+    let held = next_step(
+        &state,
+        &cfg(),
+        &mut errand,
+        &mut loot_at,
+        &mut breather,
+        &mut stop,
+        "test",
+        &labels,
+        &mut patrol,
+    )
+    .await;
+    assert_eq!(
+        held,
+        vec![Step::Idle],
+        "a productive visit still earns its pause"
     );
 }
