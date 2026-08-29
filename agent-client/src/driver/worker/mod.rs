@@ -152,6 +152,22 @@ impl Step {
     }
 }
 
+/// Why the town errand is paused, and until when.
+///
+/// A pause after a visit that achieved something is a breather — whatever
+/// sent us there may still read as unfixed for a tick or two. A pause after a
+/// town that could *not* help is a verdict, and the difference matters: the
+/// fighter is told to stay town-bound for the whole window, and standing
+/// town-bound through a verdict is how a hungry worker with no gold stops
+/// doing the one thing that earns gold. Five minutes of that, then another
+/// five, for as long as it stays hungry.
+#[derive(Debug, Clone, Copy)]
+struct TownPause {
+    until: Instant,
+    /// The town had nothing that would fix what sent us there.
+    useless: bool,
+}
+
 /// Where the worker is in the town round trip.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Errand {
@@ -496,7 +512,7 @@ pub async fn worker_driver(
     // Where the last kill fell (and how many pickups we have tried there), so
     // its drops are the only loot we detour for.
     let mut loot_at: Option<(Position, u32)> = None;
-    let mut town_blocked_until: Option<Instant> = None;
+    let mut town_blocked_until: Option<TownPause> = None;
     // How far through the town's stops this trip has looked for a merchant.
     let mut town_stop = 0usize;
     // Where the current target stood the last time we could see it.
@@ -671,7 +687,7 @@ async fn next_step(
     cfg: &WorkerConfig,
     errand: &mut Errand,
     loot_at: &mut Option<(Position, u32)>,
-    town_blocked_until: &mut Option<Instant>,
+    town_blocked_until: &mut Option<TownPause>,
     town_stop: &mut usize,
     label: &str,
     labels: &labels::BagLabels,
@@ -683,7 +699,8 @@ async fn next_step(
     // merchant must not inherit the arming from the tick that was hunting.
     // Only the fighter's own hunting legs re-arm it.
     s.abandon_leg_for = None;
-    let waiting_out_a_failed_trip = town_blocked_until.is_some_and(|t| Instant::now() < t);
+    let pause = town_blocked_until.filter(|p| Instant::now() < p.until);
+    let waiting_out_a_failed_trip = pause.is_some();
     if *errand == Errand::Work && !waiting_out_a_failed_trip && should_town_trip(&s, cfg) {
         let load = bag_load_pct(&s);
         // A scroll spends the walk home for one item. The last one is not
@@ -714,13 +731,19 @@ async fn next_step(
                     "[{label}] Worker: {}, back to work",
                     why_nothing(&s, cfg, labels)
                 );
-                *town_blocked_until = Some(Instant::now() + TOWN_RETRY_DELAY);
+                *town_blocked_until = Some(TownPause {
+                    until: Instant::now() + TOWN_RETRY_DELAY,
+                    useless: true,
+                });
                 return leave_a_useless_town(&s, cfg);
             }
             // Even a productive trip earns a pause: whatever sent us here may
             // still read as unfixed for a tick or two, and the answer to that
             // is work, not a second lap of the same shop.
-            *town_blocked_until = Some(Instant::now() + TOWN_VISIT_DELAY);
+            *town_blocked_until = Some(TownPause {
+                until: Instant::now() + TOWN_VISIT_DELAY,
+                useless: false,
+            });
             return business;
         }
         // No merchant in view: walk the town's stops until one is in sight.
@@ -741,7 +764,10 @@ async fn next_step(
         warn!("[{label}] Worker: no merchant anywhere in town, back to work");
         *errand = Errand::Work;
         *town_stop = 0;
-        *town_blocked_until = Some(Instant::now() + TOWN_RETRY_DELAY);
+        *town_blocked_until = Some(TownPause {
+            until: Instant::now() + TOWN_RETRY_DELAY,
+            useless: true,
+        });
         return leave_a_useless_town(&s, cfg);
     }
 
@@ -763,7 +789,10 @@ async fn next_step(
 
     match cfg.kind {
         WorkerKind::Fighter => {
-            let town_bound = should_town_trip(&s, cfg);
+            // Not town-bound while waiting out a town that said it cannot
+            // help: it has already answered, and hunting beats standing in
+            // front of it hoping the answer changes.
+            let town_bound = should_town_trip(&s, cfg) && !pause.is_some_and(|p| p.useless);
             // Armed only for a leg walked to find a fight, which is worth
             // dropping the moment one turns up. A leg walked to reach a
             // merchant is not — abandoning that one every time something
