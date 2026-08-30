@@ -56,13 +56,25 @@ pub struct WorkerConfig {
     /// hunger-gated server-side, so a worker with no food stops regenerating.
     #[serde(default = "default_food_stock")]
     pub food_stock: u32,
+    /// Which food `food_stock` restocks. Empty takes whatever food the
+    /// nearby merchant's catalog offers first.
+    #[serde(default)]
+    pub food_item: Option<String>,
     /// How many healing potions a town trip stocks up to.
     #[serde(default = "default_potion_stock")]
     pub potion_stock: u32,
+    /// Which potion `potion_stock` restocks and a low-health drink reaches
+    /// for. Empty keeps `healing_potion`.
+    #[serde(default)]
+    pub potion_item: Option<String>,
     /// How many return scrolls a town trip stocks up to. A scroll is the ride
     /// home from the hunting ring, so a worker that runs out walks it.
     #[serde(default = "default_scroll_stock")]
     pub scroll_stock: u32,
+    /// Which scroll `scroll_stock` restocks and the town/escape trip reads.
+    /// Empty keeps `scroll_of_return`.
+    #[serde(default)]
+    pub scroll_item: Option<String>,
     /// Carry-weight percentage that sends the worker to town.
     #[serde(default = "default_bag_full_pct")]
     pub bag_full_pct: u32,
@@ -106,8 +118,11 @@ impl Default for WorkerConfig {
             level_margin: default_level_margin(),
             low_health_pct: default_low_health_pct(),
             food_stock: default_food_stock(),
+            food_item: None,
             potion_stock: default_potion_stock(),
+            potion_item: None,
             scroll_stock: default_scroll_stock(),
+            scroll_item: None,
             bag_full_pct: default_bag_full_pct(),
             anchor_x: None,
             anchor_z: None,
