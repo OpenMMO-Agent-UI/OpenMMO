@@ -101,6 +101,53 @@ fn the_scroll_is_the_last_resort_only() {
     );
 }
 
+/// Rica sells greater_healing_potion; Wick, the night merchant, does not
+/// (`merchant_defs.rs`, `a_merchant_stocks_night_essentials`). A worker
+/// configured for the greater potion still has to survive the merchant it
+/// is actually standing in front of, whichever one carried it home.
+#[test]
+fn any_potion_in_the_bag_is_drunk_even_if_it_is_not_the_configured_type() {
+    let c = WorkerConfig {
+        potion_item: Some("greater_healing_potion".into()),
+        ..cfg()
+    };
+    let mut s = state_at(0.0, 0.0);
+    hurt(&mut s, 30);
+    bag(&mut s, HEALING_POTION, 1);
+    assert!(
+        should_drink_potion(&s, &c),
+        "whatever potion is on hand still saves the fight"
+    );
+}
+
+#[test]
+fn a_configured_restock_item_falls_back_to_whatever_the_nearby_merchant_actually_stocks() {
+    let mut s = state_at(0.0, 0.0);
+    let mut wick = test_player(3.0, 0.0);
+    wick.id = PlayerId::from(2);
+    wick.name = "Wick".to_string();
+    wick.is_official_npc = true;
+    s.nearby_players.insert(wick.id, wick);
+
+    let c = WorkerConfig {
+        potion_item: Some("greater_healing_potion".into()),
+        ..cfg()
+    };
+    // Wick does not carry the greater potion: buy what he does stock.
+    let (id, _) = potions_to_buy(&s, &c).expect("Wick sells healing potions");
+    assert_eq!(id, HEALING_POTION);
+
+    // Swap in Rica, who carries both: the configured potion wins.
+    s.nearby_players.clear();
+    let mut rica = test_player(3.0, 0.0);
+    rica.id = PlayerId::from(3);
+    rica.name = "Rica".to_string();
+    rica.is_official_npc = true;
+    s.nearby_players.insert(rica.id, rica);
+    let (id, _) = potions_to_buy(&s, &c).expect("Rica sells healing potions");
+    assert_eq!(id, "greater_healing_potion");
+}
+
 #[test]
 fn eating_waits_for_the_lost_sprint_and_needs_food_in_the_bag() {
     let mut s = state_at(0.0, 0.0);
@@ -1040,6 +1087,32 @@ fn the_food_restock_orders_what_this_merchant_actually_sells() {
     // Nobody to buy from at all: nothing to order.
     s.nearby_players.clear();
     assert_eq!(food_to_buy(&s, &cfg()), None);
+}
+
+#[test]
+fn a_configured_food_item_is_preferred_when_the_merchant_carries_it() {
+    let mut s = state_at(0.0, 0.0);
+    let mut wick = test_player(3.0, 0.0);
+    wick.id = PlayerId::from(2);
+    wick.name = "Wick".to_string();
+    wick.is_official_npc = true;
+    s.nearby_players.insert(wick.id, wick);
+
+    // Wick stocks bread and jerky; jerky is not the catalog's first meal.
+    let c = WorkerConfig {
+        food_item: Some("jerky".into()),
+        ..cfg()
+    };
+    let (id, _) = food_to_buy(&s, &c).expect("Wick sells food");
+    assert_eq!(id, "jerky");
+
+    // Wick does not carry cheese: fall back to whatever this shop sells.
+    let c = WorkerConfig {
+        food_item: Some("cheese".into()),
+        ..cfg()
+    };
+    let (id, _) = food_to_buy(&s, &c).expect("Wick sells food");
+    assert_ne!(id, "cheese");
 }
 
 // --- The patrol circle ---
