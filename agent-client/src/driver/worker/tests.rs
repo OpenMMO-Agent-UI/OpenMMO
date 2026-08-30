@@ -7,6 +7,11 @@ use onlinerpg_shared::hunger::HungerState;
 use onlinerpg_shared::inventory::ItemInstance;
 use onlinerpg_shared::{Monster, MonsterState, NoSpawnZone, PlayerId};
 
+/// Restock is category-driven now, not one fixed id per slot — these just
+/// name the canonical item each category's tests bag by default.
+const HEALING_POTION: &str = "healing_potion";
+const RETURN_SCROLL: &str = "scroll_of_return";
+
 /// The tests work in a local frame around the origin, so the anchor is pinned
 /// there: an unset anchor is the world's spawn point thousands of metres away,
 /// and every monster placed here would stand outside the patrol circle.
@@ -140,6 +145,11 @@ fn starving_with_no_food_is_a_town_trip_too() {
 #[test]
 fn the_town_trip_sells_marked_loot_drops_marked_junk_and_keeps_the_kit() {
     let mut s = state_at(0.0, 0.0);
+    let mut wick = test_player(3.0, 0.0);
+    wick.id = PlayerId::from(2);
+    wick.name = "Wick".to_string();
+    wick.is_official_npc = true;
+    s.nearby_players.insert(wick.id, wick);
     bag(&mut s, "gold_ring", 1);
     bag(&mut s, "old_boot", 1);
     bag(&mut s, HEALING_POTION, 3);
@@ -151,16 +161,19 @@ fn the_town_trip_sells_marked_loot_drops_marked_junk_and_keeps_the_kit() {
 
     assert_eq!(sell_list(&s, &labels), vec!["gold_ring".to_string()]);
     assert_eq!(junk_list(&s, &labels), vec!["old_boot".to_string()]);
-    assert_eq!(potions_to_buy(&s, &cfg()), cfg().potion_stock - 3);
+    assert_eq!(
+        potions_to_buy(&s, &cfg()).map(|(_, n)| n),
+        Some(cfg().potion_stock - 3)
+    );
 
     // A purse that covers two potions orders two, not a refused ten.
     let price = crate::item_defs::get(HEALING_POTION)
         .and_then(|d| d.base_price)
         .expect("potions are priced");
     s.self_gold = Some(price * 2);
-    assert_eq!(potions_to_buy(&s, &cfg()), 2);
+    assert_eq!(potions_to_buy(&s, &cfg()).map(|(_, n)| n), Some(2));
     s.self_gold = Some(0);
-    assert_eq!(potions_to_buy(&s, &cfg()), 0);
+    assert_eq!(potions_to_buy(&s, &cfg()), None);
 }
 
 /// Unmarked loot stays in the bag: the app's sell label is what a worker may

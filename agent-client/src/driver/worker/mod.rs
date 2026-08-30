@@ -27,9 +27,6 @@ use super::movement::{
 };
 use crate::state::SharedState;
 
-pub const HEALING_POTION: &str = "healing_potion";
-pub const RETURN_SCROLL: &str = "scroll_of_return";
-
 /// Which rule engine drives Automatic play, or `none` for the LLM agent.
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -201,28 +198,39 @@ pub(crate) fn health_pct(s: &SharedState) -> u32 {
     }
 }
 
-fn bag_units(s: &SharedState, def_id: &str) -> u32 {
+fn category(def_id: &str) -> Option<&'static str> {
+    crate::item_defs::get(def_id).and_then(|d| d.category.as_deref())
+}
+
+/// How many units of a category are carried, whichever specific items they
+/// are — a restock that fell back off the configured item still counts.
+fn bag_units_in_category(s: &SharedState, cat: &str) -> u32 {
     s.self_bag
         .iter()
-        .filter(|i| i.item_def_id == def_id)
+        .filter(|i| category(&i.item_def_id) == Some(cat))
         .map(|i| i.quantity)
         .sum()
 }
 
+/// One carried item of a category, to drink or read — whatever is actually
+/// in the bag, not necessarily the id configured to buy.
+fn bag_item_in_category(s: &SharedState, cat: &str) -> Option<String> {
+    s.self_bag
+        .iter()
+        .find(|i| category(&i.item_def_id) == Some(cat))
+        .map(|i| i.item_def_id.clone())
+}
+
 /// Drink at low health while a potion is left — the fight continues.
 pub(crate) fn should_drink_potion(s: &SharedState, cfg: &WorkerConfig) -> bool {
-    health_pct(s) < cfg.low_health_pct && bag_units(s, HEALING_POTION) > 0
+    health_pct(s) < cfg.low_health_pct && bag_units_in_category(s, "healing_potion") > 0
 }
 
 /// Out of potions at low health: read the scroll and take the town trip.
 pub(crate) fn should_use_return_scroll(s: &SharedState, cfg: &WorkerConfig) -> bool {
     health_pct(s) < cfg.low_health_pct
-        && bag_units(s, HEALING_POTION) == 0
-        && bag_units(s, RETURN_SCROLL) > 0
-}
-
-fn category(def_id: &str) -> Option<&'static str> {
-    crate::item_defs::get(def_id).and_then(|d| d.category.as_deref())
+        && bag_units_in_category(s, "healing_potion") == 0
+        && bag_units_in_category(s, "return_scroll") > 0
 }
 
 /// Kit the worker lives on — never sold, never dropped.
@@ -312,28 +320,34 @@ pub(crate) fn junk_list(s: &SharedState, labels: &labels::BagLabels) -> Vec<Stri
     ids
 }
 
-/// How many healing potions the restock buys: the gap to the stock cap, but
-/// never more than the purse can plausibly cover. The server prices the sale
-/// (a merchant's markup is its own), so this is a bound, not a quote — it
-/// only keeps a broke worker from firing refused purchases every trip.
-/// Meals the merchant in front of us sells, and how many to top up to. The
-/// item comes from that merchant's own catalog — bread is Wick's, not Rica's,
-/// and ordering what a shop does not stock burns a turn on a refusal.
-pub(crate) fn food_to_buy(s: &SharedState, cfg: &WorkerConfig) -> Option<(String, u32)> {
+/// What a town trip should buy for one category, and how many: the gap to
+/// the stock cap, never more than the purse can plausibly cover. The server
+/// prices the sale (a merchant's markup is its own), so this is a bound, not
+/// a quote — it only keeps a broke worker from firing refused purchases
+/// every trip.
+///
+/// The item comes from the merchant in front of us, not a fixed id — bread
+/// is Wick's, not Rica's, and Rica herself is not always around (she sleeps
+/// at night, per `merchant_defs.rs`). The configured item is preferred when
+/// this merchant carries it; otherwise whatever else of the category is on
+/// the shelf, the same way an unset config always worked. Ordering what a
+/// shop does not stock burns a turn on a refusal, so a category the nearby
+/// merchant has none of at all buys nothing this trip.
+fn restock_buy(
+    s: &SharedState,
+    cat: &str,
+    preferred: Option<&str>,
+    stock: u32,
+) -> Option<(String, u32)> {
     let merchant = s.nearest_merchant()?;
     let name = &s.nearby_players.get(&merchant)?.name;
     let (catalog, _) = crate::shop_info::merchant_shop(name)?;
-    let id = catalog
-        .into_iter()
-        .find(|id| category(id) == Some("food"))?
+    let preferred = preferred.filter(|id| !id.is_empty());
+    let id = preferred
+        .filter(|id| catalog.contains(id))
+        .or_else(|| catalog.into_iter().find(|id| category(id) == Some(cat)))?
         .to_string();
-    let carried: u32 = s
-        .self_bag
-        .iter()
-        .filter(|i| category(&i.item_def_id) == Some("food"))
-        .map(|i| i.quantity)
-        .sum();
-    let wanted = cfg.food_stock.saturating_sub(carried);
+    let wanted = stock.saturating_sub(bag_units_in_category(s, cat));
     let price = crate::item_defs::get(&id)
         .and_then(|d| d.base_price)
         .unwrap_or(1)
@@ -344,24 +358,26 @@ pub(crate) fn food_to_buy(s: &SharedState, cfg: &WorkerConfig) -> Option<(String
     (affordable > 0).then_some((id, affordable))
 }
 
-pub(crate) fn scrolls_to_buy(s: &SharedState, cfg: &WorkerConfig) -> u32 {
-    units_to_buy(s, RETURN_SCROLL, cfg.scroll_stock)
+pub(crate) fn food_to_buy(s: &SharedState, cfg: &WorkerConfig) -> Option<(String, u32)> {
+    restock_buy(s, "food", cfg.food_item.as_deref(), cfg.food_stock)
 }
 
-pub(crate) fn potions_to_buy(s: &SharedState, cfg: &WorkerConfig) -> u32 {
-    units_to_buy(s, HEALING_POTION, cfg.potion_stock)
+pub(crate) fn potions_to_buy(s: &SharedState, cfg: &WorkerConfig) -> Option<(String, u32)> {
+    restock_buy(
+        s,
+        "healing_potion",
+        cfg.potion_item.as_deref(),
+        cfg.potion_stock,
+    )
 }
 
-fn units_to_buy(s: &SharedState, def_id: &str, stock: u32) -> u32 {
-    let wanted = stock.saturating_sub(bag_units(s, def_id));
-    let Some(gold) = s.self_gold else {
-        return wanted;
-    };
-    let price = crate::item_defs::get(def_id)
-        .and_then(|d| d.base_price)
-        .unwrap_or(1)
-        .max(1);
-    wanted.min((gold / price).max(0) as u32)
+pub(crate) fn scrolls_to_buy(s: &SharedState, cfg: &WorkerConfig) -> Option<(String, u32)> {
+    restock_buy(
+        s,
+        "return_scroll",
+        cfg.scroll_item.as_deref(),
+        cfg.scroll_stock,
+    )
 }
 
 /// How full the bag is, as a percentage of the carry cap.
@@ -683,15 +699,19 @@ async fn self_rescue(
 ) -> Option<Vec<Step>> {
     let s = state.lock().await;
     if should_drink_potion(&s, cfg) {
-        return Some(vec![Step::Use(HEALING_POTION.to_string())]);
+        if let Some(potion) = bag_item_in_category(&s, "healing_potion") {
+            return Some(vec![Step::Use(potion)]);
+        }
     }
     // Only ever one scroll: reading it teleports but does not heal, so the
     // trigger is still true on the next tick and a whole stack would burn.
     // The town errand is what says the escape already happened.
     if *errand == Errand::Work && should_use_return_scroll(&s, cfg) {
-        info!("[{label}] Worker: reading a return scroll to escape");
-        *errand = Errand::InTown;
-        return Some(vec![Step::Use(RETURN_SCROLL.to_string())]);
+        if let Some(scroll) = bag_item_in_category(&s, "return_scroll") {
+            info!("[{label}] Worker: reading a return scroll to escape");
+            *errand = Errand::InTown;
+            return Some(vec![Step::Use(scroll)]);
+        }
     }
     should_eat(&s).map(|food| vec![Step::Use(food)])
 }
@@ -723,10 +743,12 @@ async fn next_step(
         // far end of the map is survivable in a way stranded at 10% is not.
         // `InTown` is what stops the next tick reading the same trigger and
         // burning the rest of the stack.
-        if bag_units(&s, RETURN_SCROLL) > 1 {
-            info!("[{label}] Worker: reading a return scroll to town (bag {load}%)");
-            *errand = Errand::InTown;
-            return vec![Step::Use(RETURN_SCROLL.to_string())];
+        if bag_units_in_category(&s, "return_scroll") > 1 {
+            if let Some(scroll) = bag_item_in_category(&s, "return_scroll") {
+                info!("[{label}] Worker: reading a return scroll to town (bag {load}%)");
+                *errand = Errand::InTown;
+                return vec![Step::Use(scroll)];
+            }
         }
         info!("[{label}] Worker: heading to town (bag {load}%)");
         *errand = Errand::ToTown;
@@ -897,11 +919,15 @@ pub(crate) fn town_business(
             steps.push(Step::Buy(food.clone()));
         }
     }
-    for _ in 0..potions_to_buy(s, cfg) {
-        steps.push(Step::Buy(HEALING_POTION.to_string()));
+    if let Some((potion, count)) = potions_to_buy(s, cfg) {
+        for _ in 0..count {
+            steps.push(Step::Buy(potion.clone()));
+        }
     }
-    for _ in 0..scrolls_to_buy(s, cfg) {
-        steps.push(Step::Buy(RETURN_SCROLL.to_string()));
+    if let Some((scroll, count)) = scrolls_to_buy(s, cfg) {
+        for _ in 0..count {
+            steps.push(Step::Buy(scroll.clone()));
+        }
     }
     if let Some(food) = should_eat(s) {
         steps.push(Step::Use(food));
