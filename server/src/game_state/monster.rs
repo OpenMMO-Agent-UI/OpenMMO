@@ -1132,13 +1132,13 @@ impl super::GameState {
                 if let Some(tx) = release.and_then(|(id, _)| channels.get(&id)) {
                     let still_watching = release.is_some_and(|(_, watching)| watching);
                     for message in Self::release_view_messages(&monster, still_watching) {
-                        let _ = tx.send(super::DirectMessage::Typed(message));
+                        let _ = tx.send(super::DirectMessage::Typed(Box::new(message)));
                     }
                 }
                 if let Some(tx) = channels.get(&new_owner) {
-                    let _ = tx.send(super::DirectMessage::Typed(
+                    let _ = tx.send(super::DirectMessage::Typed(Box::new(
                         ServerMessage::MonsterAssigned { monster },
-                    ));
+                    )));
                 }
             }
         }

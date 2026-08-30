@@ -169,7 +169,7 @@ struct DirectRx(tokio::sync::mpsc::UnboundedReceiver<DirectMessage>);
 impl DirectRx {
     fn try_recv(&mut self) -> Result<ServerMessage, MpscTryRecvError> {
         self.0.try_recv().map(|payload| match payload {
-            DirectMessage::Typed(msg) => msg,
+            DirectMessage::Typed(msg) => *msg,
             DirectMessage::Shared(bytes) => onlinerpg_shared::deserialize_server_msg(&bytes)
                 .expect("shared direct payload decodes"),
         })

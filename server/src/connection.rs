@@ -539,7 +539,7 @@ pub async fn handle_connection(
                         let _ = ws_sender.send(Message::Binary(bytes)).await;
                     }
                     Some(DirectMessage::Typed(msg)) => {
-                        let is_kicked = matches!(msg, ServerMessage::Kicked { .. });
+                        let is_kicked = matches!(*msg, ServerMessage::Kicked { .. });
                         if let Some(bytes) = encode_server_msg(&msg) {
                             let _ = ws_sender.send(Message::Binary(bytes)).await;
                         }

@@ -301,7 +301,7 @@ impl super::GameState {
     pub async fn send_direct_message(&self, player_id: &PlayerId, msg: ServerMessage) {
         let channels = self.direct_channels.read().await;
         if let Some(tx) = channels.get(player_id) {
-            let _ = tx.send(super::DirectMessage::Typed(msg));
+            let _ = tx.send(super::DirectMessage::Typed(Box::new(msg)));
         }
     }
 

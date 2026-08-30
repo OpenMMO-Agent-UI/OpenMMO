@@ -213,7 +213,7 @@ pub type GameStateReceiver = broadcast::Receiver<BroadcastMessage>;
 /// the connection can still inspect them (e.g. `Kicked`).
 #[derive(Debug, Clone)]
 pub enum DirectMessage {
-    Typed(ServerMessage),
+    Typed(Box<ServerMessage>),
     Shared(Bytes),
 }
 
