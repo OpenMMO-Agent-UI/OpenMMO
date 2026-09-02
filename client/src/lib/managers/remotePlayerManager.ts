@@ -18,6 +18,9 @@ import {
   type PlayerState,
 } from '../utils/movementUtils'
 import { entityGroundY } from './entity-ground'
+import { dungeonManager } from './dungeonManager'
+import { currentDungeonDepth } from '../stores/dungeonStore'
+import { observedPlayerId } from '../stores/observerStore'
 import { FishingAnimationName, SitAnimationName } from '../types/animations'
 import { shortestWrappedDeltaX } from '../terrain/world-wrap'
 import type { TerrainHeightManager } from './terrainHeightManager'
@@ -122,8 +125,20 @@ class PlayerStateManager {
       }
     })
 
-    // Snapshot other-player store state once for the frame (torch lookup below).
-    const otherPlayers = get(gameStore).otherPlayers
+    // Snapshot the player stores once for the frame (mount/torch lookups
+    // below).
+    const store = get(gameStore)
+    const otherPlayers = store.otherPlayers
+    /// Who a drawn body's state lives on. The watched character in observer
+    /// mode is never in `otherPlayers` — it is `currentPlayer` (the same
+    /// singleton trap the floorLevel lookup below documents) — so reading its
+    /// mount there always missed, and a rider was interpolated at footpace
+    /// while the server carried it off at `HORSE_MOVE_MULT`. The mirror fell
+    /// behind until the desync guard snapped it forward, over and over.
+    const drawnState = (playerId: number) =>
+      playerId === observedPlayerId()
+        ? (store.currentPlayer ?? undefined)
+        : otherPlayers.get(playerId)
 
     // Update players
     this.targetPositions.forEach((targetPos, playerId) => {
@@ -161,7 +176,7 @@ class PlayerStateManager {
 
       // Calculate movement step
       const sprinting = this.targetSprinting.get(playerId) ?? false
-      const mounted = otherPlayers.get(playerId)?.mounted
+      const mounted = drawnState(playerId)?.mounted
       const movementConfig = mounted
         ? sprinting
           ? HORSE_SPRINT_MOVEMENT_CONFIG
@@ -184,13 +199,24 @@ class PlayerStateManager {
         ).rotation
       }
 
+      // The watched character in observer mode is deliberately never in
+      // otherPlayers (it lives in currentPlayer instead — see
+      // messageHandlers.ts's GameState snapshot), so that lookup always
+      // misses for it and silently floors to floorLevel 0. dungeonManager's
+      // own live depth is the only place that id's real floor still is,
+      // mirroring how sampleHeightAt sources it for the local player.
+      const floorLevel =
+        playerId === observedPlayerId() && dungeonManager.active
+          ? -get(currentDungeonDepth)
+          : (otherPlayers.get(playerId)?.floorLevel ?? 0)
+
       // calculateMovementStep only advances XZ and carries Y over, and the
       // move protocol has no per-waypoint Y, so the ground has to be
       // resampled here. Without it a remote keeps the Y it entered the floor
       // with, which reads as sinking through dungeon and house stairs.
       result.newPos.y = entityGroundY(
         this.heightManager,
-        otherPlayers.get(playerId)?.floorLevel ?? 0,
+        floorLevel,
         result.newPos.x,
         result.newPos.z,
         currentPos.y
@@ -233,7 +259,7 @@ class PlayerStateManager {
           this.executeAttack(playerId)
         }
       } else {
-        const hasTorch = otherPlayers.get(playerId)?.torchOn ?? false
+        const hasTorch = drawnState(playerId)?.torchOn ?? false
         const movementMode = getMovementMode(
           movement.totalDistance,
           hasTorch,
@@ -423,11 +449,15 @@ class PlayerStateManager {
     }
   }
 
+  /// `sprinting` left out means "however this body was already travelling" —
+  /// the observer's route handover (GameScene) continues a leg the server is
+  /// still running, and defaulting that to a walk dropped a sprinting mirror
+  /// to footpace halfway round an obstacle.
   setTargetPosition(
     playerId: number,
     targetPosition: Position,
     rotation: number,
-    sprinting = false
+    sprinting = this.targetSprinting.get(playerId) ?? false
   ) {
     const player = this.players.get(playerId)
 
