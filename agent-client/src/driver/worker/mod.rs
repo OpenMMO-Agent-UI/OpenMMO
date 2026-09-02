@@ -168,16 +168,20 @@ impl Step {
 ///
 /// A pause after a visit that achieved something is a breather — whatever
 /// sent us there may still read as unfixed for a tick or two. A pause after a
-/// town that could *not* help is a verdict, and the difference matters: the
-/// fighter is told to stay town-bound for the whole window, and standing
-/// town-bound through a verdict is how a hungry worker with no gold stops
-/// doing the one thing that earns gold. Five minutes of that, then another
-/// five, for as long as it stays hungry.
+/// town that could *not* help is a verdict, and the difference matters: a
+/// fighter with an empty purse stays where it is — walking out would earn
+/// gold it cannot spend, and the field is the worst place for a worker that
+/// could not even stock food — while one that merely could not find anything
+/// goes back to hunting, which is how it earns the gold a later trip needs.
+/// Either way the retry is the same five minutes.
 #[derive(Debug, Clone, Copy)]
 struct TownPause {
     until: Instant,
     /// The town had nothing that would fix what sent us there.
     useless: bool,
+    /// Useless *and* broke: the purse cannot buy anything, so the fighter
+    /// stands in town instead of walking out to hunt.
+    broke: bool,
 }
 
 /// Where the worker is in the town round trip.
@@ -764,15 +768,22 @@ async fn next_step(
             if business.is_empty() {
                 // Nothing the shop can fix — starving with no gold for food,
                 // say. Coming straight back would be an endless commute.
+                let broke = broke(&s);
                 warn!(
-                    "[{label}] Worker: {}, back to work",
-                    why_nothing(&s, cfg, labels)
+                    "[{label}] Worker: {}. {}",
+                    why_nothing(&s, cfg, labels),
+                    if broke {
+                        "No money to buy anything — staying in town."
+                    } else {
+                        "Back to work."
+                    }
                 );
                 *town_blocked_until = Some(TownPause {
                     until: Instant::now() + TOWN_RETRY_DELAY,
                     useless: true,
+                    broke,
                 });
-                return leave_a_useless_town(&s, cfg);
+                return leave_a_useless_town(&s, cfg, broke);
             }
             // Even a productive trip earns a pause: whatever sent us here may
             // still read as unfixed for a tick or two, and the answer to that
@@ -780,6 +791,7 @@ async fn next_step(
             *town_blocked_until = Some(TownPause {
                 until: Instant::now() + TOWN_VISIT_DELAY,
                 useless: false,
+                broke: false,
             });
             return business;
         }
@@ -804,8 +816,9 @@ async fn next_step(
         *town_blocked_until = Some(TownPause {
             until: Instant::now() + TOWN_RETRY_DELAY,
             useless: true,
+            broke: false,
         });
-        return leave_a_useless_town(&s, cfg);
+        return leave_a_useless_town(&s, cfg, false);
     }
 
     // Fresh drops from our own kill, before anything else. Bounded: an item
@@ -826,10 +839,15 @@ async fn next_step(
 
     match cfg.kind {
         WorkerKind::Fighter => {
-            // Not town-bound while waiting out a town that said it cannot
-            // help: it has already answered, and hunting beats standing in
-            // front of it hoping the answer changes.
-            let town_bound = should_town_trip(&s, cfg) && !pause.is_some_and(|p| p.useless);
+            // Town-bound while the trip is wanted, except through a verdict
+            // that sent us hunting again. The one exception is a broke pause:
+            // there the field is not the fix, so the fighter stands in town
+            // for the whole window instead of walking out.
+            let town_bound = if pause.is_some_and(|p| p.broke) {
+                true
+            } else {
+                should_town_trip(&s, cfg) && !pause.is_some_and(|p| p.useless)
+            };
             // Armed only for a leg walked to find a fight, which is worth
             // dropping the moment one turns up. A leg walked to reach a
             // merchant is not — abandoning that one every time something
@@ -864,8 +882,15 @@ const TOWN_VISIT_DELAY: Duration = Duration::from_secs(60);
 /// no-spawn zone, so a fighter waiting out the retry delay there does nothing
 /// at all — which is what "parked at the town boundary" looked like from the
 /// outside. The fisher stays put; a town pond is a legitimate fishing hole.
-fn leave_a_useless_town(s: &SharedState, cfg: &WorkerConfig) -> Vec<Step> {
+///
+/// A broke fighter is the exception: its trip was useless because the purse
+/// cannot buy anything, and the field is not the fix either — it would earn
+/// gold it cannot spend. So it stands in town rather than walking out.
+fn leave_a_useless_town(s: &SharedState, cfg: &WorkerConfig, broke: bool) -> Vec<Step> {
     if cfg.kind != WorkerKind::Fighter {
+        return vec![Step::Idle];
+    }
+    if broke {
         return vec![Step::Idle];
     }
     let Some(me) = s.self_player.as_ref().map(|p| p.position) else {
@@ -875,6 +900,13 @@ fn leave_a_useless_town(s: &SharedState, cfg: &WorkerConfig) -> Vec<Step> {
         Some((x, z)) => vec![Step::Walk { x, z }],
         None => vec![Step::Idle],
     }
+}
+
+/// The purse is empty: known gold, none to spend. Only a *known* empty purse
+/// keeps a fighter in town — before the first GoldUpdate the purse is unknown,
+/// and parking a fresh session at its first useless stop is not the ask.
+fn broke(s: &SharedState) -> bool {
+    matches!(s.self_gold, Some(gold) if gold <= 0)
 }
 
 /// Why a trip found nothing to do, in the words of the thing the player can
