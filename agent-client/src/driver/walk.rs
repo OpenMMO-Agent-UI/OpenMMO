@@ -253,6 +253,10 @@ pub(super) enum LostReason {
     LockedDoor,
     /// The server kept refusing our steps: its layout disagrees with ours.
     Desynced,
+    /// Given up part-way because something worth fighting turned up. Only a
+    /// worker asks for this (`SharedState::abandon_leg_for`); the caller is
+    /// expected to re-decide rather than treat it as a failure.
+    PreyInReach,
 }
 
 impl LostReason {
@@ -268,8 +272,23 @@ impl LostReason {
                 "the way on is a locked door and you hold no key for it".to_string()
             }
             Self::Desynced => "the ground kept refusing your steps".to_string(),
+            Self::PreyInReach => "something worth fighting is here".to_string(),
         }
     }
+}
+
+/// Whether this leg is one a worker is willing to give up for something worth
+/// fighting.
+///
+/// Only a walk to a *place* — a patrol leg, the commute back to the anchor.
+/// Never a walk that is already aimed at something: `chase_monster` is the
+/// approach an attack makes, and the monster it is closing on is inside
+/// `STRIKE_RANGE` by construction, because that is how it got picked. Asking
+/// `prey_in_reach` there answers yes on the first pass through this loop, so
+/// arming the interrupt for it aborted every attack before it landed and the
+/// fighter could not hit anything at all.
+fn interruptible(to: &WalkTo<'_>) -> bool {
+    matches!(to, WalkTo::Place { .. })
 }
 
 /// How a walk ended.
@@ -315,6 +334,18 @@ pub(super) async fn walk(
             let Some(me) = s.self_player.as_ref().filter(|p| p.health > 0) else {
                 return Walked::Lost(LostReason::PlayerDied);
             };
+            // Checked here, between steps, because this loop is the only place
+            // a long walk is interruptible at all: a leg otherwise runs to its
+            // waypoint however good the thing that spawned in front of it, and
+            // the server drops ambient spawns about 20m ahead of a walker. The
+            // lock is already held and the check is a scan of what is nearby.
+            if interruptible(to) {
+                if let Some(margin) = s.abandon_leg_for {
+                    if super::worker::prey_in_reach(&s, margin) {
+                        return Walked::Lost(LostReason::PreyInReach);
+                    }
+                }
+            }
             let to_target = PlanarDelta::between(&me.position, &target_pos);
             let target_floor = to.floor(&s);
             let arrived = to_target.dist <= tuning.arrive_range
@@ -799,5 +830,32 @@ mod tests {
         };
         walk(&state, &to, false, Some(false)).await;
         assert!(rx.try_recv().is_err(), "no line walked through a dungeon");
+    }
+
+    /// The interrupt exists for a leg walked to *find* a fight. A walk that is
+    /// already aimed at a monster is the approach an attack makes, and the
+    /// monster is inside `STRIKE_RANGE` by construction — that is how it got
+    /// picked — so `prey_in_reach` answers yes on the first pass and the
+    /// chase aborts before it lands. Arming it there meant the fighter could
+    /// not hit anything at all.
+    #[test]
+    fn only_a_walk_to_a_place_may_be_given_up_for_prey() {
+        assert!(interruptible(&WalkTo::Place {
+            x: 0.0,
+            z: 0.0,
+            floor: 0
+        }));
+
+        let id = PlayerId::from(1);
+        for aimed in [
+            WalkTo::Monster("kobold"),
+            WalkTo::Character(&id),
+            WalkTo::GroundItem(7),
+        ] {
+            assert!(
+                !interruptible(&aimed),
+                "a walk already aimed at something must run to it"
+            );
+        }
     }
 }
