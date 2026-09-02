@@ -24,10 +24,13 @@
     xp: number
     hp: number
     maxHp: number
-    str: number
+    /** Null for a spectator: rolled attributes never reach the mirror. */
+    str: number | null
   } = $props()
 
-  const maxWeight = $derived(maxCarryWeight(str, $hungerState))
+  const maxWeight = $derived(
+    str === null ? null : maxCarryWeight(str, $hungerState)
+  )
 
   const xpInfo = $derived(levelProgress(level, xp))
   const ring = new Tween(0, { duration: 300, easing: cubicOut })
@@ -218,7 +221,11 @@
     <div class="gold"><GoldAmount copper={$playerGold} /></div>
     <div>
       <strong class="weight">{formatKg($carryWeight)}</strong>
-      <span> / {formatKg(maxWeight)} kg</span>
+      {#if maxWeight !== null}
+        <span> / {formatKg(maxWeight)} kg</span>
+      {:else}
+        <span> kg</span>
+      {/if}
     </div>
   </div>
 </button>
