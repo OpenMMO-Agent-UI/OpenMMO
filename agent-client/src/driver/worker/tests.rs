@@ -652,12 +652,12 @@ async fn a_full_bag_sells_at_the_merchant_instead_of_turning_round() {
     );
 }
 
-/// The same trip with nothing marked: the marks are the gate, so the shop has
-/// nothing it may do and the trip is written off for five minutes. The worker
-/// leaves rather than standing in a town that cannot help it — with the reason
-/// named in the log, since the bag stays full either way.
+/// The same trip with nothing marked and no money to buy anything: the marks
+/// are the gate, so the shop has nothing it may do, and an empty purse means
+/// even restocking is not on the table. The worker stays in town rather than
+/// walking out to hunt gold it cannot spend — the reason named in the log.
 #[tokio::test]
-async fn an_unmarked_full_bag_writes_the_town_trip_off_and_leaves() {
+async fn an_unmarked_full_bag_with_no_money_stays_in_town() {
     let (mut s, _rx) = test_state();
     s.self_player = Some(test_player(0.0, 0.0));
     s.self_player_id = Some(PlayerId::from(1));
@@ -703,8 +703,12 @@ async fn an_unmarked_full_bag_writes_the_town_trip_off_and_leaves() {
         };
     }
     assert!(
-        matches!(tick!().as_slice(), [Step::Walk { .. }]),
-        "trip written off, so leave the town it cannot use"
+        matches!(tick!().as_slice(), [Step::Idle]),
+        "trip written off, so stay in town: no money to spend anywhere else"
+    );
+    assert!(
+        blocked.is_some_and(|p| p.broke),
+        "and mark the pause as broke, so the fighter stays town-bound through it"
     );
     assert!(
         blocked.is_some_and(|p| p.until > Instant::now()),
@@ -712,6 +716,120 @@ async fn an_unmarked_full_bag_writes_the_town_trip_off_and_leaves() {
     );
     let s = state.lock().await;
     assert!(should_town_trip(&s, &cfg()), "with the bag still full");
+}
+
+/// The same trip with a purse that could buy something: the shop still has
+/// nothing to do (nothing marked, everything stocked), but the fighter is not
+/// broke — so it leaves town and goes hunting, which is how it earns the gold
+/// a later trip will actually be able to spend.
+#[tokio::test]
+async fn an_unmarked_full_bag_with_money_leaves_a_town_that_cannot_help() {
+    let (mut s, _rx) = test_state();
+    s.self_player = Some(test_player(0.0, 0.0));
+    s.self_player_id = Some(PlayerId::from(1));
+    s.self_hunger = Some((900, HungerState::Normal));
+    s.self_gold = Some(500);
+    s.no_spawn_zones = vec![NoSpawnZone {
+        min_x: -50.0,
+        max_x: 50.0,
+        min_z: -50.0,
+        max_z: 50.0,
+    }];
+    let mut rica = test_player(4.0, 0.0);
+    rica.id = PlayerId::from(2);
+    rica.name = "Rica".to_string();
+    rica.is_official_npc = true;
+    s.nearby_players.insert(rica.id, rica);
+    for _ in 0..40 {
+        bag(&mut s, "iron_helmet", 1);
+    }
+    // Everything the trip would restock is already on hand (no scrolls wanted,
+    // so the trip is not routed through the return-scroll escape either), which
+    // means a full purse changes nothing: the shop still has no business.
+    bag(&mut s, HEALING_POTION, cfg().potion_stock);
+    bag(&mut s, "apple", cfg().food_stock);
+    let c = WorkerConfig {
+        scroll_stock: 0,
+        ..cfg()
+    };
+    assert!(should_town_trip(&s, &c), "the bag wants a town trip");
+    assert_eq!(
+        town_business(&s, &c, &labels::BagLabels::default()),
+        Vec::new()
+    );
+
+    let labels = labels::BagLabels::default();
+    let state = std::sync::Arc::new(tokio::sync::Mutex::new(s));
+    let mut errand = Errand::Work;
+    let mut loot_at = None;
+    let mut blocked = None;
+    let mut stop = 0usize;
+    let steps = next_step(
+        &state,
+        &c,
+        &mut errand,
+        &mut loot_at,
+        &mut blocked,
+        &mut stop,
+        "test",
+        &labels,
+        &mut fighter::Patrol::default(),
+    )
+    .await;
+    assert!(
+        matches!(steps.as_slice(), [Step::Walk { .. }]),
+        "not broke, so leave the town it cannot use: {steps:?}"
+    );
+    assert!(
+        blocked.is_some_and(|p| p.until > Instant::now() && !p.broke),
+        "and pause the retry without keeping the fighter town-bound"
+    );
+}
+
+/// Through a broke pause the fighter stays town-bound: the field is not the
+/// fix for an empty purse, so even with a town trip still wanted it stands
+/// put rather than walking out to hunt.
+#[tokio::test]
+async fn a_broke_fighter_waits_out_its_verdict_in_town() {
+    let (mut s, _rx) = test_state();
+    s.self_player = Some(test_player(0.0, 0.0));
+    s.self_player_id = Some(PlayerId::from(1));
+    s.self_hunger = Some((10, HungerState::Weak));
+    s.self_gold = Some(0);
+    s.no_spawn_zones = vec![NoSpawnZone {
+        min_x: -50.0,
+        max_x: 50.0,
+        min_z: -50.0,
+        max_z: 50.0,
+    }];
+    let labels = labels::BagLabels::default();
+    assert!(should_town_trip(&s, &cfg()), "hungry with nothing to eat");
+
+    let state = std::sync::Arc::new(tokio::sync::Mutex::new(s));
+    let mut errand = Errand::Work;
+    let mut loot_at = None;
+    let mut blocked = Some(TownPause {
+        until: Instant::now() + Duration::from_secs(30),
+        useless: true,
+        broke: true,
+    });
+    let mut stop = 0usize;
+    let steps = next_step(
+        &state,
+        &cfg(),
+        &mut errand,
+        &mut loot_at,
+        &mut blocked,
+        &mut stop,
+        "test",
+        &labels,
+        &mut fighter::Patrol::default(),
+    )
+    .await;
+    assert!(
+        matches!(steps.as_slice(), [Step::Idle]),
+        "a broke fighter waits the verdict out in town, got {steps:?}"
+    );
 }
 
 /// The reported symptom: a full bag, a town trip still on the clock from an
@@ -748,6 +866,7 @@ async fn a_blocked_trip_must_not_turn_a_full_bag_round_at_the_boundary() {
     let mut blocked = Some(TownPause {
         until: Instant::now() + Duration::from_secs(30),
         useless: false,
+        broke: false,
     });
     let mut stop = 0usize;
     let steps = next_step(
@@ -1731,6 +1850,7 @@ async fn a_town_that_cannot_help_does_not_keep_the_fighter_standing() {
     let mut blocked = Some(TownPause {
         until: Instant::now() + Duration::from_secs(300),
         useless: true,
+        broke: false,
     });
     let steps = next_step(
         &state,
@@ -1753,6 +1873,7 @@ async fn a_town_that_cannot_help_does_not_keep_the_fighter_standing() {
     let mut breather = Some(TownPause {
         until: Instant::now() + Duration::from_secs(30),
         useless: false,
+        broke: false,
     });
     let held = next_step(
         &state,
