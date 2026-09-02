@@ -215,6 +215,10 @@ fn unreachable_note(monster_id: &str, loss: &LostReason) -> String {
             "[Unreachable] Monster {monster_id} is {d:.0}m away, beyond your chase range. \
              Move closer first, or pick a nearer monster."
         ),
+        LostReason::PreyInReach => format!(
+            "[Interrupted] You stopped short of monster {monster_id} — something worth \
+             fighting is already in reach."
+        ),
         LostReason::Timeout => format!(
             "[Unreachable] The chase for monster {monster_id} ran out of time — the way \
              may be blocked. Move first, or pick a different target."
@@ -1506,6 +1510,14 @@ pub(super) async fn handle_response(
                                 ));
                             }
                             MoveResult::Died => warn!("Died on the way to ({gx:.1}, {gz:.1})"),
+                            MoveResult::Interrupted => {
+                                info!("Walk to ({gx:.1}, {gz:.1}) gave way to a fight");
+                                let mut s = state.lock().await;
+                                s.push_agent_event(format!(
+                                    "[MoveInterrupted] You stopped short of \
+                                     ({gx:.1}, {gz:.1}) — something worth fighting is here."
+                                ));
+                            }
                             MoveResult::Error => {
                                 error!("Move error to ({gx:.1}, {gz:.1})");
                                 let mut s = state.lock().await;
@@ -1772,6 +1784,10 @@ async fn move_to_dungeon_floor(
                 return;
             }
             MoveResult::Died => return,
+            // Only a worker arms the walk interrupt and a worker does not walk
+            // into dungeons, so this does not happen today; stopping short is
+            // the honest degrade if one ever does.
+            MoveResult::Interrupted => return,
             MoveResult::Arrived | MoveResult::Error => {}
         }
         state.lock().await.request_dungeon_doors_here();
@@ -1825,6 +1841,18 @@ async fn move_to_dungeon_floor(
             ));
         }
         MoveResult::Died => {}
+        MoveResult::Interrupted => {
+            info!(
+                "Descent to {} floor {depth} gave way to a fight",
+                dungeon.name
+            );
+            let mut s = state.lock().await;
+            s.push_agent_event(format!(
+                "[MoveInterrupted] You stopped short of floor {depth} of {} — something \
+                 worth fighting is here.",
+                dungeon.name
+            ));
+        }
         MoveResult::Error => {
             error!("Descent to {} floor {depth} errored", dungeon.name);
             let mut s = state.lock().await;
