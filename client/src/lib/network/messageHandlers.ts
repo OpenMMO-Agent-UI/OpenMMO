@@ -28,9 +28,16 @@ import {
   playSwordMissSound,
 } from '../managers/sfxManager'
 import { FISHING_CAST_SWING_DELAY_MS } from '../data/combatTiming'
+import { clearRoute, routeObserved } from '../managers/observedPath'
+import {
+  farEnoughToSnap,
+  isObserver,
+  ownedByMe,
+  setObservedPlayerId,
+} from '../stores/observerStore'
 import { monsterManager } from '../managers/monsterManager'
 import { housingManager } from '../managers/housingManager'
-import { bridgeManager } from '../managers/bridgeManager'
+import { entityGroundY } from '../managers/entity-ground'
 import { objectManager } from '../managers/objectManager'
 import { groundItemManager } from '../managers/groundItemManager'
 import { dungeonManager } from '../managers/dungeonManager'
@@ -526,6 +533,25 @@ export function handleServerMessage(
         serverPlayer.position.x,
         serverPlayer.position.z
       )
+      // A spectator has no movement FSM of its own: the agent's walk arrives
+      // as PlayerMoved, so it is interpolated like a remote player.
+      if (isObserver) {
+        setObservedPlayerId(serverPlayer.id)
+        remotePlayerManager.initPlayer(
+          serverPlayer.id,
+          {
+            ...serverPlayer.position,
+            y: entityGroundY(
+              remotePlayerManager.heightManager,
+              serverPlayer.floor_level ?? 0,
+              serverPlayer.position.x,
+              serverPlayer.position.z,
+              serverPlayer.position.y
+            ),
+          },
+          serverPlayer.rotation
+        )
+      }
       events.joinSuccess.emit()
       break
     }
@@ -633,21 +659,66 @@ export function handleServerMessage(
 
     case 'PlayerMoved': {
       const state = get(gameStore)
-      if (state.currentPlayer?.id === data.player_id) {
+      if (!isObserver && state.currentPlayer?.id === data.player_id) {
         break
       }
-      const deckY = bridgeManager.findDeckYAt(
-        data.position.x,
-        data.position.z,
-        null
-      )
+      const floorLevel = data.floor_level ?? 0
+      // A gap the walk cannot close is a desync, not a step — see
+      // farEnoughToSnap. Only for the watched character, whose positions are
+      // synthesized from its own outbound moves; everyone else here arrives
+      // exactly as they do in normal play.
+      const isWatchedSelf =
+        isObserver && state.currentPlayer?.id === data.player_id
+      // Walking into a dungeon arrives here as ordinary PlayerMoved frames,
+      // never PlayerTeleported — dungeonManager has to be told the same way
+      // JoinSuccess/PlayerTeleported already do, or floorHeightAt below stays
+      // inactive and silently falls back to the raw, uncorrected server Y.
+      // Only the watched character's own moves should touch this — it's a
+      // singleton, and every other entity's move here belongs to someone else.
+      if (isWatchedSelf) {
+        dungeonManager.syncFromFloorLevel(
+          floorLevel,
+          data.position.x,
+          data.position.z
+        )
+      }
+      // entityGroundY resolves dungeon/housing/bridge/terrain by floor level
+      // itself — a bare bridgeManager lookup here would have no floor concept
+      // and could pick up a surface bridge's height for a position that's
+      // actually underground, since dungeon interiors reuse the same XZ range
+      // as the surface near their entrance.
+      const moveTo = {
+        x: data.position.x,
+        y: entityGroundY(
+          remotePlayerManager.heightManager,
+          floorLevel,
+          data.position.x,
+          data.position.z,
+          data.position.y
+        ),
+        z: data.position.z,
+      }
+      const drawnAt = isWatchedSelf
+        ? remotePlayerManager.players.get(data.player_id)?.position
+        : undefined
+      if (drawnAt && farEnoughToSnap(drawnAt, moveTo)) {
+        clearRoute(data.player_id)
+        remotePlayerManager.teleportPlayer(
+          data.player_id,
+          moveTo,
+          data.rotation
+        )
+        break
+      }
+      // A straight line to the next position is only right when nothing stands
+      // in it — see observedPath, which routes around what does and leaves a
+      // clear line alone.
+      const leg = drawnAt
+        ? routeObserved(data.player_id, drawnAt, moveTo, floorLevel)
+        : moveTo
       remotePlayerManager.setTargetPosition(
         data.player_id,
-        {
-          x: data.position.x,
-          y: deckY ?? data.position.y,
-          z: data.position.z,
-        },
+        leg,
         data.rotation,
         data.sprinting === true
       )
@@ -674,15 +745,27 @@ export function handleServerMessage(
 
     case 'PlayerTeleported': {
       const state = get(gameStore)
+      const floorLevel = data.floor_level ?? 0
       if (state.currentPlayer && state.currentPlayer.id === data.player_id) {
+        // Sync before computing Y below, or a teleport straight into a
+        // dungeon reads dungeonManager as still inactive and falls back to
+        // the raw, uncorrected server Y — same trap as PlayerMoved above.
+        dungeonManager.syncFromFloorLevel(
+          floorLevel,
+          data.position.x,
+          data.position.z
+        )
+        const y = entityGroundY(
+          remotePlayerManager.heightManager,
+          floorLevel,
+          data.position.x,
+          data.position.z,
+          data.position.y
+        )
         // Through the store, not a bare mutation: subscribers that live
         // across a teleport (HUD widgets) otherwise keep the old position.
         gameStore.update((s) => {
-          s.currentPlayer?.position.set(
-            data.position.x,
-            data.position.y,
-            data.position.z
-          )
+          s.currentPlayer?.position.set(data.position.x, y, data.position.z)
           return s
         })
         syncOwnFloor(data.floor_level, data.position.x, data.position.z)
@@ -690,16 +773,25 @@ export function handleServerMessage(
         // Any teleport settles the summon toast — an accepted one succeeded,
         // and one surviving the player's own departure would mislead.
         pendingPartySummons.set([])
+        if (isObserver) {
+          remotePlayerManager.teleportPlayer(
+            data.player_id,
+            { ...data.position, y },
+            data.rotation
+          )
+        }
         break
       }
-      const tpDeckY = bridgeManager.findDeckYAt(
+      const tpY = entityGroundY(
+        remotePlayerManager.heightManager,
+        floorLevel,
         data.position.x,
         data.position.z,
-        null
+        data.position.y
       )
       remotePlayerManager.teleportPlayer(
         data.player_id,
-        tpDeckY !== null ? { ...data.position, y: tpDeckY } : data.position,
+        { ...data.position, y: tpY },
         data.rotation
       )
       break
@@ -881,6 +973,20 @@ export function handleServerMessage(
       gameStore.update((state) => {
         state.otherPlayers.clear()
         remotePlayerManager.reset()
+        // That reset drops the spectator's own registration (see JoinSuccess),
+        // and the loop below re-registers everyone *except* the local id —
+        // right for a player, who drives their own movement, wrong for a
+        // spectator whose character is the one being interpolated. The server
+        // sends this baseline immediately after JoinSuccess, so without it the
+        // watched agent stands at its join position for the whole session
+        // while its PlayerMoved frames update a target nothing reads.
+        if (isObserver && state.currentPlayer) {
+          remotePlayerManager.initPlayer(
+            state.currentPlayer.id,
+            state.currentPlayer.position,
+            state.currentPlayer.rotation
+          )
+        }
         // A list, not a map: player ids are numeric and the wasm serializer
         // rejects non-string map keys (see ServerMessage::GameState).
         const serverPlayers = data.players as ServerPlayer[]
@@ -1059,7 +1165,11 @@ export function handleServerMessage(
         ? gameState.currentPlayer?.position
         : remotePlayerManager.players.get(data.player_id)?.position
       const monster = monsterManager.monsters.get(data.monster_id)
-      if (monster?.ownerId !== gameState.currentPlayer?.id) {
+      // Skipped only when we already played the swing ourselves, off our own
+      // brain's Attack command. `ownedByMe` rather than the raw ids: a
+      // spectator is handed the agent's ownership but never runs the brain, so
+      // comparing ids would suppress the one path it has.
+      if (!ownedByMe(monster?.ownerId, gameState.currentPlayer?.id)) {
         monsterManager.handleMonsterAttackStarted(
           data.monster_id,
           250,
@@ -1406,7 +1516,11 @@ export function handleServerMessage(
         stopPlayerInstrument(data.player_id)
       }
       const state = get(gameStore)
-      if (state.currentPlayer?.id === data.player_id) {
+      // The local player animates its own interactions through the movement
+      // FSM, so upstream drops the echo — but a spectator has no FSM, and the
+      // watched character's pickup crouch, bench sit and forge swing arrive
+      // here or nowhere.
+      if (!isObserver && state.currentPlayer?.id === data.player_id) {
         if (!data.object_type) emoteStopRequest.set(true)
         // Our own /emote went to the server unresolved; this broadcast is
         // its reply, the way PlayerMusicStarted starts /play_music.

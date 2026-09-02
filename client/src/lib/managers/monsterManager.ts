@@ -18,6 +18,7 @@ import {
 import { dungeonManager } from './dungeonManager'
 import { housingManager } from './housingManager'
 import { computeChaseAim } from './chase-aim'
+import { ownedByMe } from '../stores/observerStore'
 import type { Position } from '../utils/movementUtils'
 import type { TerrainHeightManager } from './terrainHeightManager'
 import {
@@ -232,7 +233,7 @@ class MonsterManager {
   /** (Re)create our WASM brain from the monster's live state. Only monsters
    *  we own get one, and corpses never do. */
   private ensureBrain(monster: MonsterData, aggressive?: boolean) {
-    if (monster.ownerId !== get(gameStore).currentPlayer?.id) return
+    if (!ownedByMe(monster.ownerId, get(gameStore).currentPlayer?.id)) return
     if (monster.state === 'dead') return
     ai_remove_brain(monster.id)
     this.ensureTemplatesLoaded()
@@ -256,7 +257,7 @@ class MonsterManager {
   remove(id: string) {
     const monster = this.monsters.get(id)
     const gameState = get(gameStore)
-    if (monster?.ownerId === gameState.currentPlayer?.id) {
+    if (ownedByMe(monster?.ownerId, gameState.currentPlayer?.id)) {
       ai_remove_brain(id)
     }
     this.monsters.delete(id)
@@ -427,7 +428,7 @@ class MonsterManager {
     if (!monster || monster.state === 'dead') return
 
     monster.targetPlayerId = playerId
-    if (monster.ownerId === get(gameStore).currentPlayer?.id) {
+    if (ownedByMe(monster.ownerId, get(gameStore).currentPlayer?.id)) {
       const commands = ai_handle_hit(monster.id, playerId, false, 0) ?? []
       this.processAiCommands(monster, commands)
     }
@@ -507,7 +508,7 @@ class MonsterManager {
     for (const monster of this.monsters.values()) {
       // Keep non-owned monster Y aligned with its floor's ground (owned
       // monsters get Y from TickResult)
-      if (monster.ownerId !== myPlayerId) {
+      if (!ownedByMe(monster.ownerId, myPlayerId)) {
         const terrainY = this.monsterGroundY(
           monster,
           monster.position.x,
@@ -548,7 +549,7 @@ class MonsterManager {
             } else {
               monster.isDeadPending = false
             }
-          } else if (monster.ownerId === myPlayerId) {
+          } else if (ownedByMe(monster.ownerId, myPlayerId)) {
             const hitCommands: AiCommand[] =
               ai_handle_hit(
                 monster.id,
@@ -594,7 +595,7 @@ class MonsterManager {
       }
 
       // Only control monsters that YOU own
-      if (monster.ownerId === myPlayerId) {
+      if (ownedByMe(monster.ownerId, myPlayerId)) {
         // Guard: If dead or about to die, stop AI immediately
         if (monster.state === 'dead' || monster.isDeadPending) {
           this.monsters.set(monster.id, { ...monster })
@@ -898,10 +899,7 @@ class MonsterManager {
       // Fanout skips the owner, so this is a correction — the brain must hear it
       // too or its next tick overwrites this pose. Unsnapped: the server's own
       // position is the authority, and emits get snapped anyway.
-      if (
-        monster.ownerId !== undefined &&
-        monster.ownerId === get(gameStore).currentPlayer?.id
-      ) {
+      if (ownedByMe(monster.ownerId, get(gameStore).currentPlayer?.id)) {
         ai_apply_authoritative_position(id, position.x, position.y, position.z)
       }
     }

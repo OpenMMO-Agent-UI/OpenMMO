@@ -32,6 +32,7 @@ import initWasm, {
   close_code_protocol_mismatch,
   close_code_client_desync,
 } from '../wasm/onlinerpg_shared'
+import { isObserver, observerUrl } from '../stores/observerStore'
 import { createEvent } from './networkEvents'
 import { handleServerMessage } from './messageHandlers'
 import type {
@@ -326,6 +327,7 @@ class NetworkManager {
       // not survive the reconnect either.
       resetPlayerTrade()
       this.connect()
+      if (isObserver) return
       const googleIdToken = getApiAuthToken()
       if (googleIdToken && this.lastCharacterId) {
         const opened = await this.waitForSocketOpen(5000)
@@ -360,6 +362,7 @@ class NetworkManager {
   }
 
   private sendMessage(msg: ClientMessage) {
+    if (isObserver) return
     if (this.socket?.readyState === WebSocket.OPEN && this.wasmReady) {
       this.ensureHandshake()
       const bytes = serializeClientMessage(msg)
@@ -372,6 +375,7 @@ class NetworkManager {
   }
 
   private sendAndSerialize(msg: ClientMessage): boolean {
+    if (isObserver) return false
     if (!this.isConnected()) return false
     this.ensureHandshake()
     const bytes = serializeClientMessage(msg)
@@ -924,7 +928,7 @@ class NetworkManager {
   /// and the first send resolve as separate promise continuations, and losing
   /// that race got the connection dropped.
   private ensureHandshake() {
-    if (this.handshakeSent) return
+    if (isObserver || this.handshakeSent) return
     this.handshakeSent = true
     const bytes = serializeClientMessage({
       ClientInfo: {
@@ -1202,6 +1206,23 @@ class NetworkManager {
         }
       }
     )
+  }
+
+  /// Spectator entry. There is nothing to send — the mirror opens with a
+  /// snapshot of the agent's world, so the JoinSuccess in it is both the
+  /// handshake and the go-ahead to draw.
+  async observe(): Promise<{ ok: boolean; message?: string }> {
+    if (!observerUrl) return { ok: false, message: 'No observe target' }
+    await this.ensureWasm()
+    this.connect(observerUrl)
+    const opened = await this.waitForSocketOpen(5000)
+    if (!opened) return { ok: false, message: 'Agent is not reachable' }
+
+    // Reaching the socket is the whole check. The agent may not be in the
+    // world yet — the panel binds its port before sign-in even runs — and the
+    // mirror relays JoinSuccess whenever it happens, so waiting on a deadline
+    // here would turn a slow login into a permanent error.
+    return { ok: true }
   }
 
   // --- Connection management ---
