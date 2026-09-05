@@ -336,7 +336,9 @@ export function makeSplatStandardMaterial({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const gridLine = (coords: any) => {
       const g = abs(fract(coords.sub(0.5)).sub(0.5)).div(fwidth(coords))
-      return float(1).sub(min(min(g.x, g.y), float(1)))
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const gv = g as any
+      return float(1).sub(min(min(gv.x, gv.y), float(1)))
     }
     const line1 = gridLine(fLocalUv.mul(TILE_DIM))
     const line64 = gridLine(fLocalUv)
