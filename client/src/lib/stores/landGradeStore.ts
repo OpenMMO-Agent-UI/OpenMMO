@@ -66,7 +66,7 @@ export async function setLandGrade(
   const resp = await apiFetch(url(rx, rz), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/octet-stream' },
-    body: grades,
+    body: grades as BodyInit,
   }).catch(() => null)
   if (!resp?.ok) {
     cache.delete(k)
