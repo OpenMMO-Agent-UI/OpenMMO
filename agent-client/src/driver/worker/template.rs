@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
-use onlinerpg_shared::{inventory::GroundItem, inventory::ItemInstance, Monster, Player};
+use onlinerpg_shared::{inventory::GroundItem, inventory::ItemInstance, Monster, Player, Position};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tokio::sync::Mutex;
@@ -64,7 +64,7 @@ impl Template {
         Ok(template)
     }
 
-    pub(super) fn decide(&self, state: &SharedState) -> Result<Vec<Value>> {
+    pub(super) fn decide(&self, state: &SharedState, cfg: &WorkerConfig) -> Result<Vec<Value>> {
         let Some(rule) = self
             .rules
             .iter()
@@ -75,9 +75,19 @@ impl Template {
         rule.actions
             .iter()
             .take(8)
-            .map(|action| canonical_action(action, state))
+            .map(|action| canonical_action(action, state, cfg))
             .collect()
     }
+}
+
+/// Intents resolve to a walk at decide time, so nothing deserializes here.
+const INTENTS: [&str; 3] = ["patrol", "flee", "return_to_anchor"];
+
+/// A selector carried under any of `keys`.
+fn selector_of<'a>(object: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a Value> {
+    keys.iter()
+        .find_map(|key| object.get(*key))
+        .filter(|value| value.get("select").is_some())
 }
 
 fn validate_action(action: &Value) -> Result<()> {
@@ -85,20 +95,42 @@ fn validate_action(action: &Value) -> Result<()> {
         .as_object()
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("action must be an object"))?;
+    if let Some(intent) = object.get("intent") {
+        let intent = intent
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("intent must be a string"))?;
+        if !INTENTS.contains(&intent) {
+            bail!("unknown intent '{intent}'");
+        }
+        return Ok(());
+    }
     let kind = object
         .remove("action")
         .or_else(|| object.get("type").cloned())
         .and_then(|value| value.as_str().map(str::to_owned))
         .ok_or_else(|| anyhow::anyhow!("action type is required"))?;
     object.insert("type".to_string(), Value::from(kind.clone()));
-    if kind == "attack" && object.get("monster_id").is_none() {
-        let selector = object
-            .remove("target")
-            .ok_or_else(|| anyhow::anyhow!("attack target is required"))?;
-        if selector.get("select").and_then(Value::as_str) != Some("monsters") {
-            bail!("attack target must select monsters");
+    match kind.as_str() {
+        "attack" if !object.contains_key("monster_id") => {
+            let selector = object
+                .remove("target")
+                .ok_or_else(|| anyhow::anyhow!("attack target is required"))?;
+            if selector.get("select").and_then(Value::as_str) != Some("monsters") {
+                bail!("attack target must select monsters");
+            }
+            object.insert("monster_id".to_string(), Value::from("validation"));
         }
-        object.insert("monster_id".to_string(), Value::from("validation"));
+        // Selectors resolve at decide time; only the collection is checkable here.
+        "use" | "pickup" => {
+            if let Some(selector) = selector_of(&object, &["item", "target"]) {
+                let wanted = if kind == "use" { "bag" } else { "ground_items" };
+                if selector.get("select").and_then(Value::as_str) != Some(wanted) {
+                    bail!("{kind} selector must select {wanted}");
+                }
+                return Ok(());
+            }
+        }
+        _ => {}
     }
     serde_json::from_value::<AgentAction>(Value::Object(object))
         .map(|_| ())
@@ -266,41 +298,132 @@ fn selector_where(selector: &Value, state: &SharedState, context: Context<'_>) -
         .is_none_or(|where_| condition(where_, state, context))
 }
 
-fn canonical_action(action: &Value, state: &SharedState) -> Result<Value> {
+/// How far a flee walks when there is no town dead zone to aim for.
+const FLEE_DISTANCE: f32 = 20.0;
+
+/// Straight away from the nearest monster.
+fn away_from_monsters(state: &SharedState, me: Position) -> Option<(f32, f32)> {
+    let monster = state.nearby_monsters.values().min_by(|a, b| {
+        me.dist_xz_sq(&a.position)
+            .total_cmp(&me.dist_xz_sq(&b.position))
+    })?;
+    let (dx, dz) = (me.x - monster.position.x, me.z - monster.position.z);
+    let length = dx.hypot(dz);
+    (length > f32::EPSILON).then(|| {
+        (
+            me.x + dx / length * FLEE_DISTANCE,
+            me.z + dz / length * FLEE_DISTANCE,
+        )
+    })
+}
+
+/// Where to go is the config's business, not the rule's. The anchor is every
+/// intent's fallback, so an intent always decides something.
+fn intent_action(intent: &str, state: &SharedState, cfg: &WorkerConfig) -> Result<Value> {
+    if !INTENTS.contains(&intent) {
+        bail!("unknown intent '{intent}'");
+    }
+    let anchor = fighter::anchor(cfg);
+    let me = state.self_player.as_ref().map(|p| p.position);
+    let (x, z) = match intent {
+        "flee" => me
+            .and_then(|me| {
+                fighter::escape_target(&state.no_spawn_zones, me)
+                    .or_else(|| away_from_monsters(state, me))
+            })
+            .unwrap_or(anchor),
+        "patrol" => me
+            .and_then(|me| {
+                fighter::patrol_target(state, me, anchor, fighter::patrol_radius(cfg), None, 0)
+            })
+            .unwrap_or(anchor),
+        _ => anchor,
+    };
+    Ok(json!({"type": "move", "x": x, "z": z, "sprint": true}))
+}
+
+/// The first matching bag item, as the def id `use` needs.
+fn resolve_bag_item(selector: &Value, state: &SharedState) -> Result<String> {
+    select(selector, state)
+        .into_iter()
+        .filter(|candidate| candidate.item.is_some())
+        .find(|candidate| selector_where(selector, state, *candidate))
+        .and_then(|candidate| candidate.item)
+        .map(|item| item.item_def_id.clone())
+        .ok_or_else(|| anyhow::anyhow!("use selector matched no bag item"))
+}
+
+/// The nearest match, as the instance id `pickup` needs;
+/// `ground_items_in_sight` is already ordered nearest first.
+fn resolve_ground_item(selector: &Value, state: &SharedState) -> Result<u64> {
+    select(selector, state)
+        .into_iter()
+        .filter(|candidate| candidate.ground_item.is_some())
+        .find(|candidate| selector_where(selector, state, *candidate))
+        .and_then(|candidate| candidate.ground_item)
+        .map(|item| item.instance_id)
+        .ok_or_else(|| anyhow::anyhow!("pickup selector matched no ground item"))
+}
+
+fn canonical_action(action: &Value, state: &SharedState, cfg: &WorkerConfig) -> Result<Value> {
     let mut object: Map<String, Value> = action
         .as_object()
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("action must be an object"))?;
+    if let Some(intent) = object.get("intent") {
+        let intent = intent
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("intent must be a string"))?;
+        return intent_action(intent, state, cfg);
+    }
     let kind = object
         .remove("action")
         .or_else(|| object.get("type").cloned())
         .and_then(|value| value.as_str().map(str::to_owned))
         .ok_or_else(|| anyhow::anyhow!("action type is required"))?;
     object.insert("type".to_string(), Value::String(kind.clone()));
-    if kind == "attack" && !object.contains_key("monster_id") {
-        let selector = object
-            .remove("target")
-            .ok_or_else(|| anyhow::anyhow!("attack target is required"))?;
-        let target = select(&selector, state)
-            .into_iter()
-            .filter(|candidate| candidate.monster.is_some())
-            .filter(|candidate| selector_where(&selector, state, *candidate))
-            .min_by(|a, b| {
-                let distance = |context: &Context<'_>| {
-                    context.monster.and_then(|monster| {
-                        state
-                            .self_player
-                            .as_ref()
-                            .map(|me| me.position.dist_xz_sq(&monster.position))
-                    })
+    match kind.as_str() {
+        "attack" if !object.contains_key("monster_id") => {
+            let selector = object
+                .remove("target")
+                .ok_or_else(|| anyhow::anyhow!("attack target is required"))?;
+            let target = select(&selector, state)
+                .into_iter()
+                .filter(|candidate| candidate.monster.is_some())
+                .filter(|candidate| selector_where(&selector, state, *candidate))
+                .min_by(|a, b| {
+                    let distance = |context: &Context<'_>| {
+                        context.monster.and_then(|monster| {
+                            state
+                                .self_player
+                                .as_ref()
+                                .map(|me| me.position.dist_xz_sq(&monster.position))
+                        })
+                    };
+                    distance(a)
+                        .partial_cmp(&distance(b))
+                        .unwrap_or(Ordering::Equal)
+                })
+                .and_then(|context| context.monster)
+                .ok_or_else(|| anyhow::anyhow!("attack selector matched no monster"))?;
+            object.insert("monster_id".to_string(), Value::from(target.id.clone()));
+        }
+        "use" | "pickup" => {
+            if let Some(selector) = selector_of(&object, &["item", "target"]).cloned() {
+                object.remove("item");
+                object.remove("target");
+                let item = if kind == "use" {
+                    Value::from(resolve_bag_item(&selector, state)?)
+                } else {
+                    Value::from(resolve_ground_item(&selector, state)?)
                 };
-                distance(a)
-                    .partial_cmp(&distance(b))
-                    .unwrap_or(Ordering::Equal)
-            })
-            .and_then(|context| context.monster)
-            .ok_or_else(|| anyhow::anyhow!("attack selector matched no monster"))?;
-        object.insert("monster_id".to_string(), Value::from(target.id.clone()));
+                object.insert("item".to_string(), item);
+            }
+        }
+        _ => {}
+    }
+    if object.values().any(|value| value.get("select").is_some()) {
+        bail!("unresolved selector in '{kind}' action");
     }
     Ok(Value::Object(object))
 }
@@ -356,7 +479,7 @@ pub(super) async fn template_worker_driver(
 
         let actions = {
             let s = state.lock().await;
-            match template.decide(&s) {
+            match template.decide(&s, &cfg) {
                 Ok(actions) => actions,
                 Err(error) => {
                     warn!("[{label}] Template worker decision failed: {error}");
