@@ -618,7 +618,7 @@ fn template_uses_the_highest_priority_matching_rule() {
     let state = state_at(0.0, 0.0);
 
     assert_eq!(
-        template.decide(&state).unwrap(),
+        template.decide(&state, &cfg()).unwrap(),
         vec![json!({"type":"say", "message":"high"})]
     );
 }
@@ -659,7 +659,7 @@ fn template_evaluates_supported_conditions_and_resolves_nearest_attack() {
     see(&mut state, monster("near", "slime", 2.0, 0.0));
 
     assert_eq!(
-        template.decide(&state).unwrap(),
+        template.decide(&state, &cfg()).unwrap(),
         vec![json!({"type":"attack", "monster_id":"near"})]
     );
 }
@@ -678,6 +678,139 @@ fn template_rejects_unknown_actions_before_deciding() {
 }
 
 #[test]
+fn template_intents_resolve_to_a_walk_the_config_places() {
+    let template = template::Template::parse(
+        r#"{
+          "format":"openmmo-worker", "version":1,
+          "rules":[{"id":"home","condition":true,"actions":[{"intent":"return_to_anchor"}]}]
+        }"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        template.decide(&state_at(30.0, -12.0), &cfg()).unwrap(),
+        vec![json!({"type":"move", "x":0.0, "z":0.0, "sprint":true})]
+    );
+}
+
+#[test]
+fn template_rejects_an_unknown_intent_before_deciding() {
+    let json = r#"{
+      "format":"openmmo-worker", "version":1,
+      "rules":[{"id":"bad","condition":true,"actions":[{"intent":"dance"}]}]
+    }"#;
+
+    assert!(template::Template::parse(json)
+        .unwrap_err()
+        .to_string()
+        .contains("dance"));
+}
+
+#[test]
+fn template_resolves_a_bag_selector_to_the_item_the_executor_uses() {
+    let template = template::Template::parse(
+        r#"{
+          "format":"openmmo-worker", "version":1,
+          "rules":[{"id":"heal","condition":true,"actions":[
+            {"action":"use","item":{"select":"bag",
+             "where":{"eq":[{"ref":"item.name"},"healing_potion"]}}}
+          ]}]
+        }"#,
+    )
+    .unwrap();
+    let mut state = state_at(0.0, 0.0);
+    bag(&mut state, "bread", 1);
+    bag(&mut state, HEALING_POTION, 2);
+
+    assert_eq!(
+        template.decide(&state, &cfg()).unwrap(),
+        vec![json!({"type":"use", "item":HEALING_POTION})]
+    );
+}
+
+#[test]
+fn template_resolves_a_ground_selector_to_the_nearest_instance_id() {
+    let template = template::Template::parse(
+        r#"{
+          "format":"openmmo-worker", "version":1,
+          "rules":[{"id":"loot","condition":{"exists":{"select":"ground_items"}},
+            "actions":[{"action":"pickup","item":{"select":"ground_items","order":"nearest"}}]}]
+        }"#,
+    )
+    .unwrap();
+    let mut state = state_at(0.0, 0.0);
+    state.remember_ground_item(ground_item(11, "coin", 9.0, 0.0, 0));
+    state.remember_ground_item(ground_item(12, "coin", 2.0, 0.0, 0));
+
+    assert_eq!(
+        template.decide(&state, &cfg()).unwrap(),
+        vec![json!({"type":"pickup", "item":12})]
+    );
+}
+
+#[test]
+fn template_reports_a_selector_that_matched_nothing() {
+    let template = template::Template::parse(
+        r#"{
+          "format":"openmmo-worker", "version":1,
+          "rules":[{"id":"heal","condition":true,"actions":[
+            {"action":"use","item":{"select":"bag",
+             "where":{"eq":[{"ref":"item.name"},"healing_potion"]}}}
+          ]}]
+        }"#,
+    )
+    .unwrap();
+
+    assert!(template
+        .decide(&state_at(0.0, 0.0), &cfg())
+        .unwrap_err()
+        .to_string()
+        .contains("no bag item"));
+}
+
+/// The shipped example, read from the parent repo that vendors this one. A
+/// standalone OpenMMO checkout has no `worker-api/`, so its absence is a skip.
+#[test]
+fn template_monster_hunter_example_hunts_heals_and_falls_back() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../worker-api/examples/monster-hunter.ommoworker.json"
+    );
+    let Ok(document) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let template = template::Template::parse(&document).expect("the example parses");
+
+    let mut hunting = state_at(0.0, 0.0);
+    see(&mut hunting, monster("far", "slime", 8.0, 0.0));
+    see(&mut hunting, monster("near", "slime", 2.0, 0.0));
+    assert_eq!(
+        template.decide(&hunting, &cfg()).unwrap(),
+        vec![json!({"type":"attack", "monster_id":"near"})]
+    );
+
+    hurt(&mut hunting, 50);
+    bag(&mut hunting, HEALING_POTION, 1);
+    assert_eq!(
+        template.decide(&hunting, &cfg()).unwrap(),
+        vec![json!({"type":"use", "item":HEALING_POTION})],
+        "a hurt hunter with a potion drinks before it swings"
+    );
+
+    let mut looting = state_at(0.0, 0.0);
+    looting.remember_ground_item(ground_item(3, "coin", 4.0, 0.0, 0));
+    assert_eq!(
+        template.decide(&looting, &cfg()).unwrap(),
+        vec![json!({"type":"pickup", "item":3})]
+    );
+
+    let idle = template.decide(&state_at(25.0, 25.0), &cfg()).unwrap();
+    assert_eq!(idle.len(), 1, "nothing to hunt or loot walks a patrol leg");
+    assert_eq!(idle[0]["type"], "move");
+    assert_eq!(idle[0]["sprint"], json!(true));
+}
+
+#[test]
 fn template_accepts_concrete_actions_and_caps_a_decision_at_eight() {
     let actions: Vec<_> = (0..10)
         .map(|n| json!({"type":"say", "message":n.to_string()}))
@@ -691,7 +824,10 @@ fn template_accepts_concrete_actions_and_caps_a_decision_at_eight() {
     )
     .unwrap();
 
-    assert_eq!(template.decide(&state_at(0.0, 0.0)).unwrap().len(), 8);
+    assert_eq!(
+        template.decide(&state_at(0.0, 0.0), &cfg()).unwrap().len(),
+        8
+    );
 }
 
 // --- Steps to actions ---
