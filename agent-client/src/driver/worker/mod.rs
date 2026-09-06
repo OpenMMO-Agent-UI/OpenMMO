@@ -10,6 +10,7 @@
 mod fighter;
 mod fisher;
 mod labels;
+mod template;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -35,6 +36,7 @@ pub enum WorkerKind {
     None,
     Fighter,
     Fisher,
+    Template,
 }
 
 /// Worker settings from the `[npcs.worker]` config table.
@@ -42,6 +44,8 @@ pub enum WorkerKind {
 pub struct WorkerConfig {
     #[serde(default)]
     pub kind: WorkerKind,
+    #[serde(default)]
+    pub template_file: Option<String>,
     /// Fight monsters up to `own level + margin`. Zero keeps the worker off
     /// anything above its own level.
     #[serde(default = "default_level_margin")]
@@ -112,6 +116,7 @@ impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
             kind: WorkerKind::None,
+            template_file: None,
             level_margin: default_level_margin(),
             low_health_pct: default_low_health_pct(),
             food_stock: default_food_stock(),
@@ -510,6 +515,10 @@ pub async fn worker_driver(
     watch: Option<Arc<crate::watch::NpcWatch>>,
     instance_prompt: Option<String>,
 ) {
+    if cfg.kind == WorkerKind::Template {
+        template::template_worker_driver(state, cfg, label, api_base_url, watch).await;
+        return;
+    }
     while !state.lock().await.in_game {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -863,7 +872,7 @@ async fn next_step(
             drop(s);
             fisher::step(job).await
         }
-        WorkerKind::None => vec![Step::Idle],
+        WorkerKind::None | WorkerKind::Template => vec![Step::Idle],
     }
 }
 
