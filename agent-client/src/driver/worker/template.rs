@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::cmp::{Ordering, Reverse};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -60,7 +60,7 @@ impl Template {
                 validate_action(action)?;
             }
         }
-        template.rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+        template.rules.sort_by_key(|rule| Reverse(rule.priority));
         Ok(template)
     }
 
@@ -198,11 +198,7 @@ fn resolve(value: &Value, state: &SharedState, context: Context<'_>) -> Value {
     };
     let me = state.self_player.as_ref();
     let pct = |health: u32, maximum: u32| {
-        Value::from(if maximum == 0 {
-            0
-        } else {
-            health.saturating_mul(100) / maximum
-        })
+        Value::from(health.saturating_mul(100).checked_div(maximum).unwrap_or(0))
     };
     match reference {
         "self.health_pct" => me.map_or(Value::Null, |p| pct(p.health, p.max_health)),
