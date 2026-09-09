@@ -51,7 +51,7 @@ use onlinerpg_shared::inventory::GroundItem;
 use onlinerpg_shared::pathfinding::{self, PassabilityCache, PathResult};
 use onlinerpg_shared::Position;
 use onlinerpg_shared::{
-    Character, ClientMessage, Monster, MonsterState, Player, PlayerId, ServerMessage,
+    Character, ClientMessage, Monster, MonsterState, NoSpawnZone, Player, PlayerId, ServerMessage,
 };
 use onlinerpg_terrain::height::HeightSampler;
 use rand::Rng;
@@ -178,6 +178,7 @@ mod world_state;
 pub use commands::ActionProgress;
 pub use events::EventUrgency;
 pub use inventory::{Carried, CarriedBagCopies};
+pub(crate) use movement::TOWN_MARGIN;
 pub use movement::{MoveTarget, MoveTargetError};
 pub use social::{PendingFriendRequest, PendingPartyInvite, PendingPartySummon, PushedTrade};
 pub use world_cache::WorldCache;
@@ -373,6 +374,11 @@ pub struct SharedState {
     pub world_cache: Arc<std::sync::RwLock<WorldCache>>,
     /// Current game time: is_night flag from server
     pub is_night: Option<bool>,
+    /// The server's nightly clock, mirrored: `game_day + is_after_sunset`.
+    /// Both the dungeon reset and the chest's one-open-per-character key off
+    /// it, so a worker waiting outside knows the chest has refilled without
+    /// the `DungeonReset` only those underground receive.
+    pub night_epoch: Option<i64>,
     pub schedule_period: Option<onlinerpg_shared::schedule::SchedulePeriod>,
     /// Serin's dark day (the merchants' meeting night), from the game date.
     pub is_serin_dark_day: Option<bool>,
@@ -417,6 +423,24 @@ pub struct SharedState {
     pub monster_ai: MonsterAiManager,
     /// Pending commands from monster AI and spawn requests
     pending_commands: Vec<ClientMessage>,
+    /// Towns: the zones monsters may not spawn in, which is how a worker
+    /// finds town and knows to walk out of one. Fetched per terrain region
+    /// (see `fetch_no_spawn_zones_around`), not received on join — protocol
+    /// v37 deleted `ServerMessage::NoSpawnZones` along with the client-driven
+    /// spawn system, and a field nothing fills reads as "no towns anywhere",
+    /// which silently parks the fighter wherever it happens to stand.
+    pub no_spawn_zones: Vec<NoSpawnZone>,
+    /// Terrain regions whose zone file has already been fetched, so moving
+    /// around a town does not re-ask for it on every chunk crossing.
+    pub fetched_zone_regions: HashSet<(i32, i32)>,
+    /// Set by a worker while it walks a leg it is willing to give up, holding
+    /// the level margin its eligibility test uses. A walk otherwise runs to
+    /// its waypoint no matter what appears — and the server spawns ambient
+    /// monsters about 20 m ahead of a walker, inside a ±30° cone off the
+    /// heading, so the thing worth fighting lands squarely in the stretch the
+    /// fighter is not looking at. `None` for the LLM driver, whose walks are
+    /// unchanged.
+    pub abandon_leg_for: Option<u32>,
     /// Spectator panel handle; feeds it chat/combat/system lines
     watch: Option<Arc<crate::watch::NpcWatch>>,
     /// Running follow loop: (target name, task handle). Anything that takes
@@ -501,6 +525,7 @@ impl SharedState {
             splat_sampler,
             world_cache,
             is_night: None,
+            night_epoch: None,
             schedule_period: None,
             is_serin_dark_day: None,
             meeting_turns: None,
@@ -519,6 +544,9 @@ impl SharedState {
             urgent_notify: Arc::new(Notify::new()),
             monster_ai: MonsterAiManager::new(),
             pending_commands: Vec::new(),
+            no_spawn_zones: Vec::new(),
+            fetched_zone_regions: HashSet::new(),
+            abandon_leg_for: None,
             watch,
             follow_task: None,
             wake_urgency: EventUrgency::Noise,

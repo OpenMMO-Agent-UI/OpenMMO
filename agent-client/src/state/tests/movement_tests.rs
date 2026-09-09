@@ -250,7 +250,9 @@ async fn a_step_sprints_only_while_the_server_would_allow_it() {
         s.self_player = Some(test_player(0.0, 0.0));
         s.always_sprint = always;
         s.self_hunger = satiation.map(|sat| (sat, hunger_state(sat)));
-        s.send_step(1.0, 0.0, 0, 0.0, false, asked).await.unwrap();
+        s.send_step(1.0, 0.0, 0, 0.0, false, asked, false)
+            .await
+            .unwrap();
         match rx.try_recv() {
             Ok(ClientMessage::PlayerMove { sprinting, .. }) => sprinting,
             other => panic!("expected a PlayerMove, got {other:?}"),

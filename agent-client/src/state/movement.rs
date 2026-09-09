@@ -1,5 +1,9 @@
 use super::*;
 
+/// Mirrors the server's `NO_SPAWN_MARGIN`: no monster spawns this close to a
+/// town, so a bot standing inside it never sees one.
+pub(crate) const TOWN_MARGIN: f32 = 30.0;
+
 /// A resolved `move` target.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MoveTarget {
@@ -315,6 +319,13 @@ impl SharedState {
     /// for steps no current action asked for (the follow task), which must
     /// stay out of the action-progress count. Returns whether the step
     /// actually sprints, which is what the caller paces the walk by.
+    ///
+    /// `append` chains this leg onto the queue the server is already walking
+    /// instead of replacing it — the same way the web client hands over a path
+    /// it has already validated. A fresh walk, and anything that follows a
+    /// stop, replaces: that is what puts the body back on an absolute route
+    /// from wherever it actually is.
+    #[allow(clippy::too_many_arguments)] // one wire message, one argument each
     pub async fn send_step(
         &mut self,
         x: f32,
@@ -323,6 +334,7 @@ impl SharedState {
         rotation: f32,
         background: bool,
         sprint: Option<bool>,
+        append: bool,
     ) -> anyhow::Result<bool> {
         let current_y = self
             .self_player
@@ -336,7 +348,7 @@ impl SharedState {
             position,
             rotation,
             floor_level,
-            append: false,
+            append,
             sprinting,
         };
         self.send_flagged_command(cmd, background).await?;
