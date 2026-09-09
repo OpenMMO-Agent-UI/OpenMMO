@@ -133,6 +133,19 @@ impl SharedState {
                     target_position,
                 }
             }
+            // Toggling the reins while up always dismounts — the server takes
+            // no view on it (`toggle_horse_mount`) — so mirror it on send.
+            // Waiting for the echo left a second tick still reading `mounted`,
+            // and the toggle it issued climbed straight back on.
+            ClientMessage::UseItem { instance_id }
+                if self.self_player.as_ref().is_some_and(|p| p.mounted)
+                    && self.bag_item_category(instance_id) == Some("horse_reins") =>
+            {
+                if let Some(p) = self.self_player.as_mut() {
+                    p.mounted = false;
+                }
+                ClientMessage::UseItem { instance_id }
+            }
             ClientMessage::InteractObject {
                 object_type,
                 object_id,

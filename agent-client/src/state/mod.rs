@@ -3,6 +3,17 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 /// Turns a merchant spends at the price meeting, the last one closing it.
 pub const MEETING_TURNS: u32 = 5;
 
+/// The server's out-of-combat window (`OUT_OF_COMBAT_MS`,
+/// `server/src/game_state/mod.rs`), mirrored because nothing on the wire
+/// reports it.
+pub const OUT_OF_COMBAT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long the horse stays off the table after the server refused a step we
+/// took on it. Long enough to walk clear of whatever geometry the arc kept
+/// clipping — a walked leg covers some 30 m in this — and short enough that a
+/// horse bought for the commute is barely given up at all.
+pub const REMOUNT_HOLD: std::time::Duration = std::time::Duration::from_secs(30);
+
 impl Drop for SharedState {
     fn drop(&mut self) {
         if let Some(id) = self.self_player_id {
@@ -51,7 +62,7 @@ use onlinerpg_shared::inventory::GroundItem;
 use onlinerpg_shared::pathfinding::{self, PassabilityCache, PathResult};
 use onlinerpg_shared::Position;
 use onlinerpg_shared::{
-    Character, ClientMessage, Monster, MonsterState, Player, PlayerId, ServerMessage,
+    Character, ClientMessage, Monster, MonsterState, NoSpawnZone, Player, PlayerId, ServerMessage,
 };
 use onlinerpg_terrain::height::HeightSampler;
 use rand::Rng;
@@ -178,6 +189,7 @@ mod world_state;
 pub use commands::ActionProgress;
 pub use events::EventUrgency;
 pub use inventory::{Carried, CarriedBagCopies};
+pub(crate) use movement::TOWN_MARGIN;
 pub use movement::{MoveTarget, MoveTargetError};
 pub use social::{PendingFriendRequest, PendingPartyInvite, PendingPartySummon, PushedTrade};
 pub use world_cache::WorldCache;
@@ -373,6 +385,11 @@ pub struct SharedState {
     pub world_cache: Arc<std::sync::RwLock<WorldCache>>,
     /// Current game time: is_night flag from server
     pub is_night: Option<bool>,
+    /// The server's nightly clock, mirrored: `game_day + is_after_sunset`.
+    /// Both the dungeon reset and the chest's one-open-per-character key off
+    /// it, so a worker waiting outside knows the chest has refilled without
+    /// the `DungeonReset` only those underground receive.
+    pub night_epoch: Option<i64>,
     pub schedule_period: Option<onlinerpg_shared::schedule::SchedulePeriod>,
     /// Serin's dark day (the merchants' meeting night), from the game date.
     pub is_serin_dark_day: Option<bool>,
@@ -391,6 +408,14 @@ pub struct SharedState {
     /// the passability cache's so it can be put straight into move packets;
     /// `passability_floor()` converts for path queries.
     pub self_floor_level: i8,
+    /// When we last swung or were struck. The server keeps this clock too
+    /// (`Player::last_combat_at`) and gates regen, `/escape` and mounting on
+    /// it, but the field is `#[serde(skip)]` and never reaches a client — so
+    /// the two messages that carry a blow stamp it here instead.
+    pub self_last_combat_at: Option<std::time::Instant>,
+    /// Until when climbing back on is a bad idea, after a refused step taken
+    /// on horseback. See `hold_the_horse`.
+    pub self_no_remount_until: Option<std::time::Instant>,
     /// Bumped every time the server snaps us back with `PositionCorrected`.
     /// A path that produced a refused step will produce it again, so movers
     /// watch this and abandon the path instead of grinding the same wall.
@@ -419,6 +444,24 @@ pub struct SharedState {
     pub monster_ai: MonsterAiManager,
     /// Pending commands from monster AI and spawn requests
     pending_commands: Vec<ClientMessage>,
+    /// Towns: the zones monsters may not spawn in, which is how a worker
+    /// finds town and knows to walk out of one. Fetched per terrain region
+    /// (see `fetch_no_spawn_zones_around`), not received on join — protocol
+    /// v37 deleted `ServerMessage::NoSpawnZones` along with the client-driven
+    /// spawn system, and a field nothing fills reads as "no towns anywhere",
+    /// which silently parks the fighter wherever it happens to stand.
+    pub no_spawn_zones: Vec<NoSpawnZone>,
+    /// Terrain regions whose zone file has already been fetched, so moving
+    /// around a town does not re-ask for it on every chunk crossing.
+    pub fetched_zone_regions: HashSet<(i32, i32)>,
+    /// Set by a worker while it walks a leg it is willing to give up, holding
+    /// the level margin its eligibility test uses. A walk otherwise runs to
+    /// its waypoint no matter what appears — and the server spawns ambient
+    /// monsters about 20 m ahead of a walker, inside a ±30° cone off the
+    /// heading, so the thing worth fighting lands squarely in the stretch the
+    /// fighter is not looking at. `None` for the LLM driver, whose walks are
+    /// unchanged.
+    pub abandon_leg_for: Option<u32>,
     /// Spectator panel handle; feeds it chat/combat/system lines
     watch: Option<Arc<crate::watch::NpcWatch>>,
     /// Running follow loop: (target name, task handle). Anything that takes
@@ -503,6 +546,7 @@ impl SharedState {
             splat_sampler,
             world_cache,
             is_night: None,
+            night_epoch: None,
             schedule_period: None,
             is_serin_dark_day: None,
             meeting_turns: None,
@@ -514,6 +558,8 @@ impl SharedState {
             position_corrections: 0,
             mount_recovery_id: 0,
             mount_recovery_result: None,
+            self_last_combat_at: None,
+            self_no_remount_until: None,
             self_pose_settles_at: None,
             pending_chest_open: None,
             treasure_chests_spent: HashSet::new(),
@@ -523,9 +569,43 @@ impl SharedState {
             urgent_notify: Arc::new(Notify::new()),
             monster_ai: MonsterAiManager::new(),
             pending_commands: Vec::new(),
+            no_spawn_zones: Vec::new(),
+            fetched_zone_regions: HashSet::new(),
+            abandon_leg_for: None,
             watch,
             follow_task: None,
             wake_urgency: EventUrgency::Noise,
         }
+    }
+
+    /// Whether the server still counts us as fighting. Its window
+    /// (`OUT_OF_COMBAT_MS`) outlasts the last blow by ten seconds, and a mount
+    /// asked for inside it is refused.
+    pub fn in_combat(&self) -> bool {
+        self.self_last_combat_at
+            .is_some_and(|at| at.elapsed() < OUT_OF_COMBAT)
+    }
+
+    /// A blow landed on us or by us: start the out-of-combat clock over.
+    pub(crate) fn note_combat(&mut self) {
+        self.self_last_combat_at = Some(std::time::Instant::now());
+    }
+
+    /// The server refused a step we were taking on horseback. Mounted movement
+    /// is an arc and gets no wall slide (`tick_player_movement`,
+    /// `server/src/game_state/player.rs`): on foot a step that grazes an edge
+    /// slides along it and the leg carries on, on horseback the same graze is
+    /// refused outright, the whole queue is dropped and we are snapped back.
+    /// Nothing about that changes if we try again — the route is the one a
+    /// walking body was pathed for, and the horse swings wide of it the same
+    /// way every time — so the only thing that ends it is getting off.
+    pub(crate) fn hold_the_horse(&mut self) {
+        self.self_no_remount_until = Some(std::time::Instant::now() + REMOUNT_HOLD);
+    }
+
+    /// Whether the horse is being held off after such a refusal.
+    pub fn horse_held(&self) -> bool {
+        self.self_no_remount_until
+            .is_some_and(|until| std::time::Instant::now() < until)
     }
 }

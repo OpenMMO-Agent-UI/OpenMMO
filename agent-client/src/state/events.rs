@@ -360,6 +360,14 @@ impl SharedState {
                 rotation,
                 floor_level,
             } => {
+                // A refused step is the one correction the rider causes, and
+                // on horseback it costs the whole queue: the mount gets no
+                // wall slide, so the graze that a walker slides past stops us
+                // dead. Trying the same leg again on the same horse is the
+                // loop that reads as a character struggling on the spot.
+                if self.self_player.as_ref().is_some_and(|p| p.mounted) {
+                    self.hold_the_horse();
+                }
                 self.relocate_self(*position, *rotation, *floor_level);
             }
             ServerMessage::PlayerTeleported {
@@ -475,6 +483,12 @@ impl SharedState {
                     self.set_self_pose(None, None);
                 }
             }
+            // Sunset swept the dungeons: guardians are back up and the chests
+            // have refilled. Only players underground at the time are told, so
+            // `night_epoch` above carries the same news to one waiting outside.
+            ServerMessage::DungeonReset => {
+                self.treasure_chests_spent.clear();
+            }
             ServerMessage::DungeonPropBroken {
                 ref entrance_id,
                 depth,
@@ -580,6 +594,9 @@ impl SharedState {
                 ..
             } => {
                 self.set_player_health(player_id, *current_health);
+                if self.self_player_id.as_ref() == Some(player_id) {
+                    self.note_combat();
+                }
             }
             ServerMessage::PlayerDead { player_id } => {
                 self.set_player_health(player_id, 0);
@@ -989,6 +1006,11 @@ impl SharedState {
                 ..
             } => {
                 self.handle_managed_monster_hit(monster_id, player_id, *hit, *damage);
+                // A swing counts whether or not it lands: the server stamps
+                // its own clock on the roll, not on the damage.
+                if self.self_player_id.as_ref() == Some(player_id) {
+                    self.note_combat();
+                }
             }
             ServerMessage::MonsterProvoked {
                 player_id,
@@ -1126,9 +1148,16 @@ impl SharedState {
                 return urgency;
             }
             ServerMessage::GameTimeSync { datetime, is_night } => {
-                let dark = onlinerpg_shared::moon::is_serin_dark_day(
-                    onlinerpg_shared::moon::game_day_index(datetime),
-                );
+                let day = onlinerpg_shared::moon::game_day_index(datetime);
+                let dark = onlinerpg_shared::moon::is_serin_dark_day(day);
+                // The server's own `night_epoch`, recomputed from the clock it
+                // just sent. A flip is nightfall: the dungeons reset and every
+                // chest owes its once-a-night again.
+                let epoch = day + i64::from(onlinerpg_shared::celestial::is_after_sunset(datetime));
+                if self.night_epoch.is_some_and(|seen| seen != epoch) {
+                    self.treasure_chests_spent.clear();
+                }
+                self.night_epoch = Some(epoch);
                 if !dark {
                     self.meeting_turns = None;
                 }
