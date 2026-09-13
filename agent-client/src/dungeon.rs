@@ -91,6 +91,12 @@ impl Dungeon {
     }
 
     /// Deepest floor of this dungeon (1-based).
+    /// The guardian's monster type — what the boss standing beside the
+    /// treasure chest is, since the wire's `Monster` carries no boss flag.
+    pub fn boss_type(&self) -> &str {
+        &self.def.boss
+    }
+
     pub fn max_depth(&self) -> u8 {
         self.layouts.len() as u8
     }
@@ -133,6 +139,54 @@ impl Dungeon {
             depth,
             layout.up_shaft.exit_cell(),
         ))
+    }
+
+    /// Where to walk to sweep `depth` for monsters: the cells the layout
+    /// spawns them in, which is also where the server stands them back up
+    /// after `MONSTER_RESPAWN_MS`. Room centres fill in for a floor whose
+    /// table spawned nothing. The guardian's own cell is left out — the boss
+    /// floor is claimed, not swept.
+    ///
+    /// Sight underground reaches one room, so "nothing eligible here" is a
+    /// statement about the room, not the floor. This tour is what turns it
+    /// into one about the floor.
+    pub fn sweep_stops(&self, depth: u8) -> Vec<Position> {
+        let Some(layout) = self.layout_at(depth) else {
+            return Vec::new();
+        };
+        let stops: Vec<Position> = layout
+            .spawns
+            .iter()
+            .filter(|s| !s.is_boss)
+            .map(|s| cell_center(&self.entrance, depth, (s.x, s.z)))
+            .collect();
+        if !stops.is_empty() {
+            return stops;
+        }
+        layout
+            .rooms
+            .iter()
+            .map(|r| cell_center(&self.entrance, depth, r.center()))
+            .collect()
+    }
+
+    /// The treasure chest's own cell on the final floor, or `None` for a
+    /// dungeon whose generated depth cut short of one. Where its haul lands,
+    /// not somewhere to walk to — see [`Self::treasure_approach`].
+    pub fn treasure_position(&self) -> Option<Position> {
+        let depth = self.max_depth();
+        let layout = self.layout_at(depth)?;
+        Some(cell_center(&self.entrance, depth, layout.chest?))
+    }
+
+    /// Where to walk to reach the chest from elsewhere on the floor. The
+    /// chest is a 1x1 collision pillar, so its own cell is a goal no path can
+    /// ever arrive at; `stand_cell` swaps it for the cell beside it.
+    pub fn treasure_approach(&self) -> Option<Position> {
+        let depth = self.max_depth();
+        let layout = self.layout_at(depth)?;
+        let cell = layout.chest?;
+        Some(cell_center(&self.entrance, depth, layout.stand_cell(cell)))
     }
 
     /// Every chest someone at `pos` on `depth` can see: the ones sharing their
