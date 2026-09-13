@@ -83,7 +83,7 @@ const CONSTRAINT_ITERATIONS = 3
 const MAX_SEGMENT_BEND = Math.PI * 0.28
 const MAX_ROOT_BEND = Math.PI * 0.42
 /** Gap kept between the sheet and the measured back surface (m). */
-const SURFACE_CLEARANCE = 0.02
+const SURFACE_CLEARANCE = 0.028
 /** Bows the top corners forward around the shoulders (m). The collar anchors
  *  are kinematic and the profile is the back's deepest point, so this leans on
  *  the shoulders receding from that point by more than the wrap. */

@@ -10,6 +10,7 @@
   import type { EnchantEffectAnchor } from '../../utils/playerEffectAnchors'
   import { applyEnchantLight } from '../../utils/enchantLight'
   import PlayerControl from '../PlayerControl.svelte'
+  import { isObserver } from '../../stores/observerStore'
   import type { PlayerControlEvent } from '../player-control/events'
   import type {
     ChatBubble,
@@ -46,7 +47,10 @@
   } from '../../terrain/world-wrap'
   import { OFFSCREEN_Y } from '../../utils/house-geo-utils'
   import { torchLightEnabled } from '../../stores/debugStore'
-  import { localTorchEquipped } from '../../stores/inventoryStore'
+  import {
+    localTorchEquipped,
+    shieldGlowLit,
+  } from '../../stores/inventoryStore'
   import { LIGHT_WAKE, LIGHT_FADE } from '../../effects/radiance'
 
   const TORCH_OFFSET = new THREE.Vector3(
@@ -389,7 +393,8 @@
         scale: CAMPFIRE_INTENSITY_SCALE,
       }
     }
-    const localTorch = get(localTorchEquipped) || get(torchLightEnabled)
+    const localTorch =
+      get(localTorchEquipped) || get(torchLightEnabled) || get(shieldGlowLit)
     const localRadiance = radianceStrengths.get(currentPlayer.id) ?? 0
     if (localTorch || localRadiance > 0) {
       const p = currentPlayer.position
@@ -583,7 +588,9 @@
       : (remotePlayers.get(id)?.rotation ?? 0)}
 />
 
-{#if camera && currentPlayer}
+<!-- A spectator has no input and no movement of its own: the agent's
+     position arrives over the mirror. -->
+{#if camera && currentPlayer && !isObserver}
   <PlayerControl
     bind:this={playerControl}
     {waterSurfaceAt}
