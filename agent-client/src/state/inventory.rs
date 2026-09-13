@@ -23,6 +23,29 @@ pub enum CarriedBagCopies {
 }
 
 impl SharedState {
+    /// What we carry and what we can carry, in the server's units: bag plus
+    /// worn gear against STR × 15 scaled by the hunger band
+    /// (`max_carry_weight` in the server's inventory.rs).
+    pub fn carry_load(&self) -> (f32, f32) {
+        let weight = |def_id: &str| crate::item_defs::get(def_id).map_or(0.0, |d| d.weight);
+        let carried: f32 = self
+            .self_bag
+            .iter()
+            .map(|i| weight(&i.item_def_id) * i.quantity as f32)
+            .chain(self.self_equipped.values().map(|i| weight(&i.item_def_id)))
+            .sum();
+        let strength = self
+            .characters
+            .first()
+            .map(|c| c.attributes.r#str as f32)
+            .unwrap_or(10.0);
+        let band = self
+            .self_hunger
+            .map_or(onlinerpg_shared::hunger::HungerState::Normal, |(_, b)| b);
+        let capacity = strength * 15.0 * onlinerpg_shared::hunger::state_multipliers(band).2;
+        (carried, capacity)
+    }
+
     /// Every bag copy of the resolved item still available this turn.
     /// `spent` counts the units of each instance already given away earlier
     /// this turn, keyed by instance id: the bag snapshot only refreshes when
