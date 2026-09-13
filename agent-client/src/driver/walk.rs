@@ -32,6 +32,37 @@ const REROUTE_THRESHOLD: f32 = 1.5;
 /// How often to poll when there is no step to send.
 const IDLE_TICK_MS: u64 = 200;
 
+/// How early the next leg is handed to the server, so the queue it walks is
+/// never empty between two legs of the same route. The web client hands its
+/// whole validated path over the same way (`append`); a step that only leaves
+/// once the previous one has run out puts a network round trip of standing
+/// still into every 4 m, which is the stop-start walk a spectator sees.
+///
+/// Borrowed once, at the start of a walk, and never again: subtracting it from
+/// every leg would pace the route faster than the body can walk it, and the
+/// server's queue would grow for as long as the walk lasted. It is given back
+/// where the route runs out (`settle_handover`), so a walk still ends with the
+/// body where our own position model says it is — what the server judges a
+/// sale, a pickup or a swing by.
+const HANDOVER_LEAD_MS: u64 = 250;
+
+/// How long to wait after handing over a leg the server takes `step_ms` to
+/// walk. `queued` says the server is already walking one of ours, which is
+/// what the lead above has already bought.
+fn pace_after_step(step_ms: u64, queued: bool) -> u64 {
+    let lead = if queued { 0 } else { HANDOVER_LEAD_MS };
+    step_ms.saturating_sub(lead).max(50)
+}
+
+/// Give back the head start the first handover borrowed. Only the walks that
+/// end in an arrival pay it: a walk given up on (prey in reach, a target gone)
+/// is followed by a move that replaces the queue anyway.
+async fn settle_handover(owed: &mut u64) {
+    if *owed > 0 {
+        tokio::time::sleep(Duration::from_millis(std::mem::take(owed))).await;
+    }
+}
+
 const MAX_CHASE_SECS: f32 = 15.0;
 /// Longer than the combat chase: an approach target can be anywhere inside
 /// the sight radius.
@@ -64,6 +95,18 @@ const MAX_DOOR_PROBES: usize = 6;
 /// Ignore doors further away than this: a door across the map is not what
 /// stands between us and the goal, and every probe costs a path search.
 const MAX_DOOR_SEARCH_DIST: f32 = 40.0;
+
+/// The same underground, where the "map" is one `GRID`-metre floor: the
+/// surface radius is shorter than the floor, so the door that is the only way
+/// on can sit outside it and never be probed. `MAX_DOOR_PROBES` still bounds
+/// the cost, and candidates are still tried nearest-first.
+pub(crate) fn door_search_dist(underground: bool) -> f32 {
+    if underground {
+        onlinerpg_shared::dungeon::GRID as f32 * std::f32::consts::SQRT_2
+    } else {
+        MAX_DOOR_SEARCH_DIST
+    }
+}
 
 /// Where a walk is headed. One row here and one in [`WalkTo::tuning`] is the
 /// whole of what makes a chase different from a commute.
@@ -243,6 +286,10 @@ pub(super) enum LostReason {
     LockedDoor,
     /// The server kept refusing our steps: its layout disagrees with ours.
     Desynced,
+    /// Given up part-way because something worth fighting turned up. Only a
+    /// worker asks for this (`SharedState::abandon_leg_for`); the caller is
+    /// expected to re-decide rather than treat it as a failure.
+    PreyInReach,
 }
 
 impl LostReason {
@@ -258,8 +305,23 @@ impl LostReason {
                 "the way on is a locked door and you hold no key for it".to_string()
             }
             Self::Desynced => "the ground kept refusing your steps".to_string(),
+            Self::PreyInReach => "something worth fighting is here".to_string(),
         }
     }
+}
+
+/// Whether this leg is one a worker is willing to give up for something worth
+/// fighting.
+///
+/// Only a walk to a *place* — a patrol leg, the commute back to the anchor.
+/// Never a walk that is already aimed at something: `chase_monster` is the
+/// approach an attack makes, and the monster it is closing on is inside
+/// `STRIKE_RANGE` by construction, because that is how it got picked. Asking
+/// `prey_in_reach` there answers yes on the first pass through this loop, so
+/// arming the interrupt for it aborted every attack before it landed and the
+/// fighter could not hit anything at all.
+fn interruptible(to: &WalkTo<'_>) -> bool {
+    matches!(to, WalkTo::Place { .. })
 }
 
 /// How a walk ended.
@@ -346,6 +408,13 @@ pub(super) async fn walk(
     let mut unreachable = false;
     let mut last_goal: Option<(f32, f32)> = None;
     let mut corrections = state.lock().await.position_corrections;
+    // Whether the server still holds a leg of this walk. Legs chain onto it;
+    // the first one of a walk, and the first after any stop, replace instead —
+    // a queue kept across a stop would walk the body along a path we have
+    // already stopped believing in.
+    let mut queued = false;
+    // The lead borrowed by the first handover, owed back at the end of the route.
+    let mut lead_owed = 0u64;
 
     loop {
         if started.elapsed().as_secs_f32() > tuning.max_secs {
@@ -361,12 +430,26 @@ pub(super) async fn walk(
             let Some(me) = s.self_player.as_ref().filter(|p| p.health > 0) else {
                 return Walked::Lost(LostReason::PlayerDied);
             };
+            // Checked here, between steps, because this loop is the only place
+            // a long walk is interruptible at all: a leg otherwise runs to its
+            // waypoint however good the thing that spawned in front of it, and
+            // the server drops ambient spawns about 20m ahead of a walker. The
+            // lock is already held and the check is a scan of what is nearby.
+            if interruptible(to) {
+                if let Some(margin) = s.abandon_leg_for {
+                    if super::worker::prey_in_reach(&s, margin) {
+                        return Walked::Lost(LostReason::PreyInReach);
+                    }
+                }
+            }
             let to_target = PlanarDelta::between(&me.position, &target_pos);
             let target_floor = to.floor(&s);
             let arrived = to_target.dist <= tuning.arrive_range
                 && !(tuning.needs_clear_line && s.attack_line_blocked(target_pos.x, target_pos.z))
                 && !(matches!(to, WalkTo::Place { .. }) && s.passability_floor() != target_floor);
             if arrived {
+                drop(s);
+                settle_handover(&mut lead_owed).await;
                 return Walked::Arrived;
             }
             if to_target.dist > tuning.max_distance {
@@ -421,6 +504,10 @@ pub(super) async fn walk(
             debug!("Re-pathing after a server position correction ({repaths})");
             route.clear();
             leg = 0;
+            // Whatever the server was walking for us it has just overruled —
+            // there is no head start left to give back.
+            queued = false;
+            lead_owed = 0;
         }
 
         let goal_moved = match last_goal {
@@ -453,13 +540,19 @@ pub(super) async fn walk(
             last_goal = Some(goal);
         }
 
-        match step_along(state, &route, &mut leg, background, sprint).await {
+        match step_along(state, &route, &mut leg, background, sprint, queued).await {
             Step::Sent(ms) => {
-                tokio::time::sleep(Duration::from_millis(ms.max(50))).await;
+                let paced = pace_after_step(ms, queued);
+                lead_owed += ms.saturating_sub(paced);
+                tokio::time::sleep(Duration::from_millis(paced)).await;
+                queued = true;
                 continue;
             }
             Step::Error => return Walked::Error,
-            Step::Nothing => {}
+            Step::Nothing => {
+                settle_handover(&mut lead_owed).await;
+                queued = false;
+            }
         }
 
         // Nothing left to walk.
@@ -525,6 +618,7 @@ async fn step_along(
     leg: &mut usize,
     background: bool,
     sprint: Option<bool>,
+    append: bool,
 ) -> Step {
     while *leg < route.len() {
         let wp = &route[*leg];
@@ -550,7 +644,7 @@ async fn step_along(
         };
         let turn_ms = s.mount_turn_delay_ms(to_wp.rotation());
         return match s
-            .send_step(x, z, wp.floor, to_wp.rotation(), background, sprint)
+            .send_step(x, z, wp.floor, to_wp.rotation(), background, sprint, append)
             .await
         {
             Ok(sprinting) => {
@@ -596,7 +690,17 @@ async fn nudge(
     }
     let turn_ms = s.mount_turn_delay_ms(to_goal.rotation());
     match s
-        .send_step(x, z, floor, to_goal.rotation(), background, sprint)
+        .send_step(
+            x,
+            z,
+            floor,
+            to_goal.rotation(),
+            background,
+            sprint,
+            // A nudge is what a stopped walk sends when A* has nothing: it
+            // starts from where the server says we are, so it replaces.
+            false,
+        )
         .await
     {
         Ok(sprinting) => {
@@ -636,10 +740,22 @@ async fn open_blocking_door(
     // than paying for the same search again.
     let corrections = state.lock().await.position_corrections;
     let mut leg = 0usize;
+    let mut queued = false;
+    let mut lead_owed = 0u64;
     loop {
-        match step_along(state, &route, &mut leg, background, sprint).await {
-            Step::Sent(ms) => tokio::time::sleep(Duration::from_millis(ms.max(50))).await,
-            Step::Nothing => break,
+        match step_along(state, &route, &mut leg, background, sprint, queued).await {
+            Step::Sent(ms) => {
+                let paced = pace_after_step(ms, queued);
+                lead_owed += ms.saturating_sub(paced);
+                tokio::time::sleep(Duration::from_millis(paced)).await;
+                queued = true;
+            }
+            // The door is opened from where the body is, not from where the
+            // handover let us get ahead of it.
+            Step::Nothing => {
+                settle_handover(&mut lead_owed).await;
+                break;
+            }
             Step::Error => return false,
         }
         if state.lock().await.position_corrections != corrections {
@@ -676,12 +792,13 @@ async fn pick_reachable_door(
     let floor = s.passability_floor();
     let reach = |x: f32, z: f32| PlanarDelta::xz(position.x, position.z, x, z).dist;
 
+    let cap = door_search_dist(s.self_floor_level < 0);
     let mut doors = closed_doors_on_our_floor(&s);
     let mut sides: Vec<(f32, usize, (f32, f32))> = doors
         .iter()
         .enumerate()
         .flat_map(|(i, door)| door.sides.map(|side| (reach(side.0, side.1), i, side)))
-        .filter(|(dist, _, _)| *dist <= MAX_DOOR_SEARCH_DIST)
+        .filter(|(dist, _, _)| *dist <= cap)
         .collect();
     sides.sort_by(|a, b| a.0.total_cmp(&b.0));
 
@@ -1112,6 +1229,65 @@ mod tests {
         );
     }
 
+    /// A route is one walk, not a step per network round trip: the legs after
+    /// the first chain onto the queue the server is already walking, so the
+    /// body never stands still between them. Anything that stops the walk
+    /// (an arrival, a correction, a nudge) replaces instead — see `send_step`.
+    #[tokio::test(start_paused = true)]
+    async fn a_route_hands_its_legs_over_without_stopping() {
+        let (mut s, mut rx) = test_state();
+        s.self_player = Some(test_player(0.5, 0.5));
+        s.self_player_id = Some(PlayerId::from(1));
+        let floor = s.passability_floor();
+        let state = Arc::new(Mutex::new(s));
+        let to = WalkTo::Place {
+            x: 20.5,
+            z: 0.5,
+            floor,
+        };
+
+        let started = tokio::time::Instant::now();
+        assert_eq!(walk(&state, &to, false, Some(false)).await, Walked::Arrived);
+
+        // The head start is borrowed, not spent: 20 m still takes 20 m of
+        // walking (`MOVE_SPEED`, integer-truncated per leg), so the body has
+        // finished the route by the time the caller acts on the arrival.
+        let ms = started.elapsed().as_millis() as u64;
+        let ground = (20.0 / onlinerpg_shared::world::PLAYER_MOVE_SPEED * 1000.0) as u64;
+        assert!(
+            (ground - 20..=ground).contains(&ms),
+            "a 20 m walk took {ms}ms, not {ground}ms"
+        );
+
+        let mut appends = Vec::new();
+        while let Ok(ClientMessage::PlayerMove { append, .. }) = rx.try_recv() {
+            appends.push(append);
+        }
+        assert!(
+            appends.len() > 2,
+            "a 20 m walk is several legs: {appends:?}"
+        );
+        assert!(!appends[0], "the first leg replaces whatever was queued");
+        assert!(
+            appends[1..].iter().all(|&a| a),
+            "the rest chain: {appends:?}"
+        );
+    }
+
+    /// The lead is what keeps the queue from running dry between two legs, and
+    /// it is bought once: taking it out of every leg would hand the server
+    /// waypoints faster than it can walk them.
+    #[test]
+    fn the_handover_lead_is_paid_once() {
+        assert_eq!(pace_after_step(900, false), 900 - HANDOVER_LEAD_MS);
+        assert_eq!(pace_after_step(900, true), 900);
+        assert_eq!(
+            pace_after_step(60, false),
+            50,
+            "never sleeps away to nothing"
+        );
+    }
+
     /// Underground a missing route is a wall, not un-pathable ground.
     #[tokio::test(start_paused = true)]
     async fn a_walk_with_no_route_underground_sends_nothing() {
@@ -1124,5 +1300,32 @@ mod tests {
         };
         walk(&state, &to, false, Some(false)).await;
         assert!(rx.try_recv().is_err(), "no line walked through a dungeon");
+    }
+
+    /// The interrupt exists for a leg walked to *find* a fight. A walk that is
+    /// already aimed at a monster is the approach an attack makes, and the
+    /// monster is inside `STRIKE_RANGE` by construction — that is how it got
+    /// picked — so `prey_in_reach` answers yes on the first pass and the
+    /// chase aborts before it lands. Arming it there meant the fighter could
+    /// not hit anything at all.
+    #[test]
+    fn only_a_walk_to_a_place_may_be_given_up_for_prey() {
+        assert!(interruptible(&WalkTo::Place {
+            x: 0.0,
+            z: 0.0,
+            floor: 0
+        }));
+
+        let id = PlayerId::from(1);
+        for aimed in [
+            WalkTo::Monster("kobold"),
+            WalkTo::Character(&id),
+            WalkTo::GroundItem(7),
+        ] {
+            assert!(
+                !interruptible(&aimed),
+                "a walk already aimed at something must run to it"
+            );
+        }
     }
 }

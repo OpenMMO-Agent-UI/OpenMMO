@@ -475,6 +475,12 @@ impl SharedState {
                     self.set_self_pose(None, None);
                 }
             }
+            // Sunset swept the dungeons: guardians are back up and the chests
+            // have refilled. Only players underground at the time are told, so
+            // `night_epoch` above carries the same news to one waiting outside.
+            ServerMessage::DungeonReset => {
+                self.treasure_chests_spent.clear();
+            }
             ServerMessage::DungeonPropBroken {
                 ref entrance_id,
                 depth,
@@ -1126,9 +1132,16 @@ impl SharedState {
                 return urgency;
             }
             ServerMessage::GameTimeSync { datetime, is_night } => {
-                let dark = onlinerpg_shared::moon::is_serin_dark_day(
-                    onlinerpg_shared::moon::game_day_index(datetime),
-                );
+                let day = onlinerpg_shared::moon::game_day_index(datetime);
+                let dark = onlinerpg_shared::moon::is_serin_dark_day(day);
+                // The server's own `night_epoch`, recomputed from the clock it
+                // just sent. A flip is nightfall: the dungeons reset and every
+                // chest owes its once-a-night again.
+                let epoch = day + i64::from(onlinerpg_shared::celestial::is_after_sunset(datetime));
+                if self.night_epoch.is_some_and(|seen| seen != epoch) {
+                    self.treasure_chests_spent.clear();
+                }
+                self.night_epoch = Some(epoch);
                 if !dark {
                     self.meeting_turns = None;
                 }
