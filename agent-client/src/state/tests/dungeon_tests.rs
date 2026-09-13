@@ -342,3 +342,204 @@ fn opening_a_door_reopens_the_route_behind_it() {
         "the way down stayed sealed after opening floor 1's doors"
     );
 }
+
+/// The chest's one-open-per-character and the dungeon reset both key off the
+/// server's `night_epoch`, and only players underground when it turns are
+/// sent `DungeonReset`. Mirroring the epoch off the clock is what lets a
+/// worker waiting on the surface know the chest has refilled.
+#[test]
+fn nightfall_refills_the_chest_for_anyone_watching_the_clock() {
+    use onlinerpg_shared::celestial::get_solar_daylight_window;
+    use onlinerpg_shared::GameDateTime;
+
+    let (mut s, dungeon, _rx) = dungeon_state();
+    let me = PlayerId::from(1);
+    s.self_player_id = Some(me);
+
+    let at = |hour: u8| GameDateTime {
+        year: 1,
+        month: 6,
+        day: 10,
+        hour,
+        minute: 0,
+    };
+    // Whole hours either side of the boundary, since the epoch turns on the
+    // fractional sunset hour and the clock we send reads in whole ones.
+    let sunset = get_solar_daylight_window(6, 10).sunset_hour;
+    assert!(
+        (1.0..23.0).contains(&sunset),
+        "this date needs a sunset inside the day to straddle"
+    );
+    let (before, after) = (sunset.floor() as u8 - 1, sunset.ceil() as u8);
+
+    let sync = |s: &mut SharedState, hour: u8| {
+        s.push_event(ServerMessage::GameTimeSync {
+            datetime: at(hour),
+            is_night: f64::from(hour) >= sunset,
+        });
+    };
+
+    sync(&mut s, before);
+    s.push_event(ServerMessage::DungeonChestOpened {
+        entrance_id: dungeon.id.clone(),
+        player_id: me,
+        item_def_ids: Vec::new(),
+        gold: 0,
+    });
+    assert!(s.treasure_chest_spent(&dungeon.id));
+
+    // Same side of sunset: the chest still owes us nothing.
+    sync(&mut s, before);
+    assert!(s.treasure_chest_spent(&dungeon.id));
+
+    sync(&mut s, after);
+    assert!(
+        !s.treasure_chest_spent(&dungeon.id),
+        "sunset turned the epoch, so the chest has refilled"
+    );
+}
+
+/// The server's own word for the same thing, for a worker that was still
+/// underground when the sweep came through.
+#[test]
+fn the_reset_message_refills_the_chest_too() {
+    let (mut s, dungeon, _rx) = dungeon_state();
+    let me = PlayerId::from(1);
+    s.self_player_id = Some(me);
+    s.push_event(ServerMessage::DungeonChestOpened {
+        entrance_id: dungeon.id.clone(),
+        player_id: me,
+        item_def_ids: Vec::new(),
+        gold: 0,
+    });
+    assert!(s.treasure_chest_spent(&dungeon.id));
+
+    s.push_event(ServerMessage::DungeonReset);
+    assert!(!s.treasure_chest_spent(&dungeon.id));
+}
+
+/// Doors start shut, so a descent needing one opened is the normal case, and
+/// the door can be most of a floor from where the leg starts. A search radius
+/// shorter than the floor leaves the walker giving up on a door it never
+/// looked at — and nothing about that attempt changes, so every retry fails
+/// identically.
+#[test]
+fn every_descent_can_reach_the_door_that_blocks_it() {
+    use onlinerpg_shared::dungeon::{interior_doors, world_to_cell};
+
+    let reach = crate::driver::walk::door_search_dist(true);
+    for (x, z) in [
+        (-1450.0f32, 4720.0f32),
+        (-1616.0, 4918.0),
+        (-1785.2, 5072.3),
+    ] {
+        let (mut s, dungeon, _rx) = dungeon_state_at(x, z);
+        for depth in 2..=dungeon.max_depth() {
+            // The landing a descent from above actually arrives on.
+            let up = dungeon.arrival_position(depth - 1).unwrap();
+            let cell = world_to_cell(&dungeon.entrance, up.x, up.z);
+            let from = stand_at(&mut s, &dungeon, depth - 1, cell);
+
+            let goal = dungeon.arrival_position(depth).unwrap();
+            let floor = dungeon.passability_floor(depth);
+            let all: Vec<(u8, u32)> = interior_doors(&dungeon.layouts()[(depth - 2) as usize])
+                .into_iter()
+                .map(|door| (depth - 1, door.door_id))
+                .collect();
+
+            // Doors on the floor we stand on are the whole story: opening
+            // them opens the way down.
+            s.world_cache
+                .write()
+                .unwrap()
+                .set_dungeon_doors(&dungeon.id, &all);
+            assert!(
+                s.find_path_to(goal.x, goal.z, floor).found,
+                "{} {} -> {depth}: unreachable even with this floor's doors open",
+                dungeon.name,
+                depth - 1
+            );
+
+            // And each of them is inside the radius the walker searches, so
+            // none can be the one it never tries.
+            s.world_cache
+                .write()
+                .unwrap()
+                .set_dungeon_doors(&dungeon.id, &[]);
+            for door in dungeon.closed_doors(depth - 1, &std::collections::HashSet::new()) {
+                let near = door
+                    .sides
+                    .iter()
+                    .map(|(dx, dz)| (dx - from.x).hypot(dz - from.z))
+                    .fold(f32::INFINITY, f32::min);
+                assert!(
+                    near <= reach,
+                    "{} floor {}: door {} is {near:.0}m from the landing, past the {reach:.0}m \
+                     the walker searches",
+                    dungeon.name,
+                    depth - 1,
+                    door.door_id
+                );
+            }
+        }
+    }
+}
+
+/// The chest is a 1x1 collision pillar, so its own cell is a goal no path can
+/// arrive at. Walking at it stopped short of the chamber in every dungeon
+/// whose layout did not happen to drop the partial path inside the room —
+/// which read from the outside as a chest the worker simply never opened.
+#[test]
+fn the_chest_is_approached_from_a_cell_a_path_can_reach() {
+    for (x, z) in [
+        (-1450.0f32, 4720.0f32),
+        (-1616.0, 4918.0),
+        (-1785.2, 5072.3),
+    ] {
+        let (mut s, dungeon, _rx) = dungeon_state_at(x, z);
+        let depth = dungeon.max_depth();
+        let chest = dungeon
+            .treasure_position()
+            .expect("a chest on the last floor");
+        let spot = dungeon.treasure_approach().expect("and a way up to it");
+        assert_ne!(
+            (spot.x, spot.z),
+            (chest.x, chest.z),
+            "{}: the chest's own cell is sealed",
+            dungeon.name
+        );
+
+        let floor = dungeon.passability_floor(depth);
+        assert!(
+            !s.world_cache
+                .read()
+                .unwrap()
+                .is_walkable(chest.x, chest.z, floor),
+            "{}: the chest cell would be walkable, so this test proves nothing",
+            dungeon.name
+        );
+        assert!(
+            s.world_cache
+                .read()
+                .unwrap()
+                .is_walkable(spot.x, spot.z, floor),
+            "{}: the approach cell is not standable",
+            dungeon.name
+        );
+        // And it is beside the chest, not merely somewhere on the floor: the
+        // sighting that turns the walk into an open is room-scoped.
+        stand_at(
+            &mut s,
+            &dungeon,
+            depth,
+            onlinerpg_shared::dungeon::world_to_cell(&dungeon.entrance, spot.x, spot.z),
+        );
+        assert!(
+            s.chests_in_sight()
+                .iter()
+                .any(|c| c.kind == crate::dungeon::ChestKind::Treasure),
+            "{}: standing on the approach must put the chest in sight",
+            dungeon.name
+        );
+    }
+}
