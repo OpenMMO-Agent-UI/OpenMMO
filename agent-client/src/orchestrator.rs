@@ -138,6 +138,11 @@ pub struct NpcConfig {
     pub serve_tables: Option<bool>,
     /// Path to tables file (curated order-taking spots per chair).
     pub tables_file: Option<String>,
+
+    /// Rule-based worker settings (`[npcs.worker]`). A `kind` other than
+    /// `none` replaces the LLM driver with a deterministic engine.
+    #[serde(default)]
+    pub worker: driver::WorkerConfig,
 }
 
 impl NpcConfig {
@@ -504,7 +509,10 @@ async fn run_npc_session(
     }
 
     let llm_enabled = npc.llm != LlmType::None;
-    let entering = llm_enabled
+    // A worker drives the character itself, so it needs the game entered
+    // even with no LLM configured.
+    let worker_enabled = npc.worker.kind != driver::WorkerKind::None;
+    let entering = (llm_enabled || worker_enabled)
         .then(|| characters.first())
         .flatten()
         .map(|c| (c.id, c.name.clone()));
@@ -590,7 +598,19 @@ async fn run_npc_session(
         }
     });
 
-    let llm_task = spawn_llm_task(npc, &state, shared, server_url, watch.clone());
+    let llm_task = if worker_enabled {
+        let cfg = npc.worker.clone();
+        let state = Arc::clone(&state);
+        let label = label.to_string();
+        let api_base_url = api_base_url(server_url);
+        let watch = watch.clone();
+        let instance_prompt = npc.instance_prompt.clone();
+        Some(tokio::spawn(async move {
+            driver::worker_driver(state, cfg, label, api_base_url, watch, instance_prompt).await;
+        }))
+    } else {
+        spawn_llm_task(npc, &state, shared, server_url, watch.clone())
+    };
 
     let maintenance_state = Arc::clone(&state);
     let maintenance_task = tokio::spawn(async move {
@@ -617,7 +637,9 @@ async fn run_npc_session(
         }
     });
 
-    if llm_enabled {
+    if worker_enabled {
+        info!("[{}] Running the {:?} worker", label, npc.worker.kind);
+    } else if llm_enabled {
         info!("[{}] Running in LLM-driven mode", label);
     } else {
         info!("[{}] Running in direct mode", label);
