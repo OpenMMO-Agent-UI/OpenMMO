@@ -33,7 +33,14 @@ pub(super) fn travel_ms(step_dist: f32, sprinting: bool, move_mult: f32) -> u64 
 
 /// Maximum distance per move step (units). Longer segments are subdivided
 /// so the NPC walks at MOVE_SPEED instead of teleporting.
-pub(super) const MAX_STEP_DIST: f32 = 3.0;
+///
+/// Must stay above the client's walk/jog cutoff (`getMovementMode` in
+/// `client/src/lib/utils/movementUtils.ts` walks anything `<= 3`). A step from
+/// standstill is the whole distance a watching client is given, so subdividing
+/// at the cutoff itself opened every journey with ~0.8s of walk animation under
+/// a body already gliding at jog speed — the skating a human never shows,
+/// because their client sends the smoothed waypoint whole.
+pub(super) const MAX_STEP_DIST: f32 = 4.0;
 const SCHEDULE_ARRIVAL_RADIUS: f32 = 2.0;
 
 /// Forced moves are split into legs under the server's target-distance cap;
@@ -46,6 +53,10 @@ pub(super) enum MoveResult {
     Blocked,
     Died,
     Error,
+    /// Given up part-way because something worth fighting turned up. Only a
+    /// worker asks for this (`SharedState::abandon_leg_for`); the caller is
+    /// expected to re-decide rather than treat it as a failure.
+    Interrupted,
 }
 
 /// Which schedule entry is due at the current game time.
@@ -166,6 +177,9 @@ pub(super) async fn execute_schedule_move(state: &Arc<Mutex<SharedState>>, entry
                 warn!("Patrol waypoint {i} blocked — skipping ({wx:.1}, {wz:.1})");
             }
             MoveResult::Died => return,
+            MoveResult::Interrupted => {
+                warn!("Patrol waypoint {i} interrupted — skipping ({wx:.1}, {wz:.1})");
+            }
             MoveResult::Error => {
                 error!("Patrol waypoint {i} error");
             }
@@ -210,6 +224,14 @@ pub(super) async fn execute_schedule_move(state: &Arc<Mutex<SharedState>>, entry
                 true
             }
             MoveResult::Died => false,
+            MoveResult::Interrupted => {
+                // Only a worker arms the walk interrupt and a worker has no
+                // schedule, so this does not happen today. Degrading rather
+                // than asserting keeps a future caller that does arm it from
+                // wedging an NPC's whole day on a panic.
+                warn!("Schedule move interrupted");
+                false
+            }
             MoveResult::Error => {
                 error!("Schedule move error");
                 false
@@ -295,6 +317,7 @@ pub(super) async fn execute_move(
         walk::Walked::Arrived => MoveResult::Arrived,
         walk::Walked::Error => MoveResult::Error,
         walk::Walked::Lost(walk::LostReason::PlayerDied) => MoveResult::Died,
+        walk::Walked::Lost(walk::LostReason::PreyInReach) => MoveResult::Interrupted,
         walk::Walked::Lost(_) => MoveResult::Blocked,
     }
 }
@@ -381,6 +404,152 @@ pub(super) async fn fetch_furniture_around(
     }
     if synced_regions > 0 {
         debug!("[{label}] Synced furniture for {synced_regions} region(s)");
+    }
+}
+
+/// Region zone data, as served by `/api/terrain/zones/{rx}/{rz}` — the same
+/// endpoint the browser client's map editor reads.
+#[derive(serde::Deserialize)]
+struct RegionZones {
+    #[serde(default, rename = "noSpawnZones")]
+    no_spawn_zones: Vec<onlinerpg_shared::NoSpawnZone>,
+}
+
+/// Fetch the towns around `positions`.
+///
+/// Protocol v37 deleted `ServerMessage::NoSpawnZones` along with the whole
+/// client-driven spawn system, so this no longer arrives on the wire. The
+/// server still refuses to place an ambient monster inside a no-spawn zone
+/// (`ambient_spawn.rs`), and spawns are now granted per metre walked rather
+/// than by the clock — so a worker that does not know where towns are stands
+/// in one waiting for monsters that cannot come, which is a silent stall
+/// rather than an error. Same per-region shape as `fetch_furniture_around`,
+/// against `zones` instead of `objects`.
+pub(super) async fn fetch_no_spawn_zones_around(
+    state: &Arc<Mutex<SharedState>>,
+    positions: &[(f32, f32)],
+    api_base_url: &str,
+    label: &str,
+) {
+    let mut regions = HashSet::new();
+    for (x, z) in positions {
+        insert_region(&mut regions, *x, *z);
+    }
+    {
+        let s = state.lock().await;
+        regions.retain(|region| !s.fetched_zone_regions.contains(region));
+    }
+    if regions.is_empty() {
+        return;
+    }
+
+    let client = http_client();
+    let fetches = regions.iter().map(|&(rx, rz)| {
+        let client = &client;
+        let url = format!("{api_base_url}/api/terrain/zones/{rx}/{rz}");
+        async move {
+            let resp = match client.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => resp.json::<RegionZones>().await.ok(),
+                _ => None,
+            };
+            (rx, rz, resp)
+        }
+    });
+    let results = futures_util::future::join_all(fetches).await;
+
+    let mut s = state.lock().await;
+    let mut learned = 0usize;
+    for (rx, rz, resp) in results {
+        // Only a success marks the region done: a region that genuinely has
+        // no towns answers with an empty list, so a miss here is a transient
+        // failure and must stay retryable. Blinding ourselves to a town on
+        // one dropped request would park the worker in it indefinitely.
+        let Some(resp) = resp else { continue };
+        s.fetched_zone_regions.insert((rx, rz));
+        learned += resp.no_spawn_zones.len();
+        s.no_spawn_zones.extend(resp.no_spawn_zones);
+    }
+    if learned > 0 {
+        debug!("[{label}] Learned {learned} no-spawn zone(s)");
+    }
+}
+
+/// Insert a position's chunk and its 8 neighbors into the set.
+fn insert_chunk_neighbors(chunks: &mut HashSet<(i32, i32)>, x: f32, z: f32) {
+    let cx = (x / HOUSING_CHUNK_SIZE).floor() as i32;
+    let cz = (z / HOUSING_CHUNK_SIZE).floor() as i32;
+    for dx in -1..=1i32 {
+        for dz in -1..=1i32 {
+            chunks.insert((cx + dx, cz + dz));
+        }
+    }
+}
+
+/// Fetch houses from the HTTP API for every chunk `positions` touches (plus
+/// their neighbors), so pathfinding can avoid buildings.
+pub(super) async fn fetch_houses_around(
+    world_cache: &Arc<std::sync::RwLock<crate::state::WorldCache>>,
+    positions: &[(f32, f32)],
+    api_base_url: &str,
+    label: &str,
+) {
+    let mut chunks = HashSet::new();
+    for (x, z) in positions {
+        insert_chunk_neighbors(&mut chunks, *x, *z);
+    }
+    world_cache
+        .read()
+        .unwrap()
+        .unfetched_house_chunks(&mut chunks);
+    if chunks.is_empty() {
+        return;
+    }
+
+    debug!(
+        "[{label}] Fetching houses for {} chunk(s): {:?}",
+        chunks.len(),
+        chunks
+    );
+    let client = http_client();
+    let fetches = chunks.iter().map(|&(cx, cz)| {
+        let client = &client;
+        let url = format!("{api_base_url}/api/housing/area/{cx}/{cz}");
+        async move {
+            let houses = match client.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => resp.json::<Vec<HouseData>>().await.ok(),
+                Ok(resp) => {
+                    warn!(
+                        "[{label}] Housing API returned {} for chunk ({cx},{cz})",
+                        resp.status()
+                    );
+                    None
+                }
+                Err(e) => {
+                    warn!("[{label}] Failed to fetch houses for chunk ({cx},{cz}): {e}");
+                    None
+                }
+            };
+            (cx, cz, houses)
+        }
+    });
+    let results = futures_util::future::join_all(fetches).await;
+
+    let mut count = 0usize;
+    {
+        let mut world = world_cache.write().unwrap();
+        for (cx, cz, houses) in results {
+            let Some(houses) = houses else { continue };
+            world.mark_houses_fetched((cx, cz));
+            count += houses.len();
+            for house in houses {
+                world.add_house(house);
+            }
+        }
+    }
+    if count == 0 {
+        info!("[{label}] No houses found in any chunk");
+    } else {
+        info!("[{label}] Loaded {count} house(s) for pathfinding");
     }
 }
 
@@ -584,5 +753,40 @@ mod tests {
         };
         let legs = force_move_legs(&from, to);
         assert_eq!(legs, vec![to]);
+    }
+
+    /// The live endpoint's shape, captured from `GET /api/terrain/zones/-2/4`
+    /// — the region the world spawn point sits in, whose two zones are the
+    /// town and one map-editor sliver.
+    ///
+    /// Pinned because every failure mode of this parse is an *empty list*,
+    /// not an error: rename a field upstream and `no_spawn_zones` silently
+    /// becomes "no towns anywhere", which parks the fighter where it stands
+    /// with nothing in any log to say why.
+    #[test]
+    fn region_zones_parses_the_terrain_api_shape() {
+        let body = r#"{"monsterSpawns":[{"monsterType":"scp939","maxTotal":10}],
+            "noSpawnZones":[
+              {"maxX":-1440.4592,"maxZ":4822.6214,"minX":-1554.4193,"minZ":4704.4310},
+              {"maxX":-1439.6045,"maxZ":4774.6276,"minX":-1447.0233,"minZ":4770.3604}
+            ]}"#;
+
+        let parsed: RegionZones = serde_json::from_str(body).expect("terrain zone payload");
+
+        assert_eq!(parsed.no_spawn_zones.len(), 2);
+        let town = &parsed.no_spawn_zones[0];
+        assert!(town.contains(-1500.0, 4750.0), "spawn point is inside town");
+        assert!(!town.contains(-1600.0, 4750.0), "west of town is outside");
+    }
+
+    /// A region with no towns answers 200 with the key absent. That must read
+    /// as "none here", not as a failed fetch — `#[serde(default)]` is what
+    /// keeps the region markable as done.
+    #[test]
+    fn a_region_without_towns_parses_as_empty() {
+        let parsed: RegionZones =
+            serde_json::from_str(r#"{"monsterSpawns":[]}"#).expect("empty region payload");
+
+        assert!(parsed.no_spawn_zones.is_empty());
     }
 }
