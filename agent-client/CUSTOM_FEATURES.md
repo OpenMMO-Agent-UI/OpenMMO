@@ -248,6 +248,15 @@ A worker decides every 200 ms when nothing is being fought (`DECISION_TICK`,
 the walk's own idle tick); in a fight the tick is whatever is left of the
 attack cooldown, so a swing goes out the moment the last one has run.
 
+Underground, a door leaving the interest set (`DungeonDoorState` with
+`is_open: None`) keeps the state it was last seen in rather than reading as
+shut. Nothing but a locked door closes on its own, and the climb back up a
+section targets the floor above's arrival landing — behind that floor's door,
+which the mover cannot open from the floor below. Read as shut, every door
+opened on the way down sealed the way back up, and the dungeoneer swept the
+section's bottom floor forever ("the way is sealed"). The server restates
+the real state the moment the door is back in range.
+
 Workers respect the desktop app's bag labels: the sell/drop marks written
 into the character's `instance.txt` under the `<!-- BAG LABELS -->` block are
 re-read on every town errand, and only marked loot is sold / marked junk is

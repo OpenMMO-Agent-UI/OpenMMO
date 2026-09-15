@@ -544,3 +544,51 @@ fn the_chest_is_approached_from_a_cell_a_path_can_reach() {
         );
     }
 }
+
+/// The interest set drops a door the moment we are a floor away, and the
+/// message for that is `is_open: None`. Reading it as shut meant every door
+/// we had opened on the way down was sealed again on the way back up — the
+/// climb targets the floor above's arrival landing, which sits behind that
+/// floor's door, and the mover only opens doors on the floor it stands on.
+#[test]
+fn a_door_leaving_interest_keeps_the_state_it_was_last_seen_in() {
+    use onlinerpg_shared::dungeon::{interior_doors, world_to_cell};
+    let (mut s, dungeon, _rx) = dungeon_state_at(-1064.0, 4248.0);
+    let door = interior_doors(&dungeon.layouts()[12])
+        .into_iter()
+        .next()
+        .expect("floor 13 has a door");
+    let state = |is_open| ServerMessage::DungeonDoorState {
+        entrance_id: dungeon.id.clone(),
+        depth: 13,
+        door_id: door.door_id,
+        is_open,
+    };
+    s.push_event(state(Some(true)));
+    s.push_event(state(None));
+    assert!(
+        s.world_cache
+            .read()
+            .unwrap()
+            .open_dungeon_doors(&dungeon.id, 13)
+            .contains(&door.door_id),
+        "leaving range is not the door shutting"
+    );
+
+    // From floor 14, the climb to 13's landing routes through that door.
+    let cell = world_to_cell(&dungeon.entrance, -1072.5, 4218.5);
+    stand_at(&mut s, &dungeon, 14, cell);
+    let goal = dungeon.arrival_position(13).unwrap();
+    assert!(
+        s.find_path_to(goal.x, goal.z, dungeon.passability_floor(13))
+            .found,
+        "the way back up to 13 is open"
+    );
+
+    s.push_event(state(Some(false)));
+    assert!(
+        !s.find_path_to(goal.x, goal.z, dungeon.passability_floor(13))
+            .found,
+        "a door the server says is shut still seals it"
+    );
+}

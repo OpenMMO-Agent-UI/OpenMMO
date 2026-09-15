@@ -16,7 +16,7 @@ static NO_ROD: std::sync::Once = std::sync::Once::new();
 /// The server's own cast limit; stay a little inside it.
 const CAST_RANGE: f32 = onlinerpg_shared::fishing::MAX_CAST_DISTANCE_METERS - 1.0;
 /// How far out to look for water when none is within casting range.
-const SEARCH_RANGE: f32 = crate::state::NPC_SIGHT_RADIUS;
+const SEARCH_RANGE: f32 = crate::state::EVENT_DELIVERY_RADIUS;
 /// Sampling grid spacing, in metres. The wider sweep is coarser on purpose:
 /// it runs every tick until water is found, and a shoreline is far bigger
 /// than one cell.
