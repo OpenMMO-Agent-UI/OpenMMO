@@ -552,19 +552,27 @@ impl SharedState {
                     .unwrap()
                     .set_dungeon_doors(entrance_id, doors);
             }
+            // `None` is the door leaving the interest set, not the door
+            // shutting: nothing but a locked door closes on its own, so the
+            // last state seen is the best guess for a route across a floor
+            // we no longer stand on — reading it as shut sealed every climb
+            // back up, since the mover only opens doors on its own floor.
+            // The server restates the real state the moment it is back in
+            // range.
             ServerMessage::DungeonDoorState {
                 entrance_id,
                 depth,
                 door_id,
-                is_open,
+                is_open: Some(is_open),
             } => {
                 self.world_cache.write().unwrap().set_dungeon_door(
                     entrance_id,
                     *depth,
                     *door_id,
-                    is_open.unwrap_or(false),
+                    *is_open,
                 );
             }
+            ServerMessage::DungeonDoorState { is_open: None, .. } => {}
             ServerMessage::DungeonPropState {
                 entrance_id,
                 depth,

@@ -23,9 +23,7 @@ use tracing::{info, warn};
 
 use super::combat::{load_attack_cooldown, tick_combat};
 use super::execute::handle_response;
-use super::movement::{
-    coverage_positions, fetch_furniture_around, fetch_houses_around, fetch_no_spawn_zones_around,
-};
+use super::movement::{coverage_positions, fetch_furniture_around, fetch_no_spawn_zones_around};
 use crate::state::SharedState;
 
 /// Which rule engine drives Automatic play, or `none` for the LLM agent.
@@ -580,7 +578,7 @@ fn nearest_town(s: &SharedState) -> Option<&onlinerpg_shared::NoSpawnZone> {
 
 /// Where to stand while looking for a merchant: the town's centre, then its
 /// four quarters. One look from the centre is not a search — sight reaches
-/// NPC_SIGHT_RADIUS, and a town is wider than that, so a merchant on the far
+/// EVENT_DELIVERY_RADIUS, and a town is wider than that, so a merchant on the far
 /// side stayed invisible and every trip was written off as "no merchant".
 pub(crate) fn town_stops(s: &SharedState) -> Vec<(f32, f32)> {
     let Some(z) = nearest_town(s) else {
@@ -693,7 +691,8 @@ pub async fn worker_driver(
     }
     info!("[{label}] Worker ({:?}) in game, ready.", cfg.kind);
 
-    // Pathfinding is blind to buildings until the housing data is in.
+    // Houses arrive automatically via the server's interest-set push; only
+    // furniture and no-spawn zones still need an explicit fetch.
     let mut world_data_at = {
         let (world_cache, around) = {
             let s = state.lock().await;
@@ -704,7 +703,6 @@ pub async fn worker_driver(
         };
         let area = coverage_positions(&[], around);
         tokio::join!(
-            fetch_houses_around(&world_cache, &area, &api_base_url, &label),
             fetch_furniture_around(&world_cache, &area, &api_base_url, &label),
             // Before the first decision, not after: the fighter's very first
             // tick asks whether it is standing in a town, and an empty answer
@@ -908,7 +906,6 @@ async fn refresh_world_data(
     }
     let area = [(p.x, p.z)];
     tokio::join!(
-        fetch_houses_around(&world_cache, &area, api_base_url, label),
         fetch_furniture_around(&world_cache, &area, api_base_url, label),
         fetch_no_spawn_zones_around(state, &area, api_base_url, label),
     );
