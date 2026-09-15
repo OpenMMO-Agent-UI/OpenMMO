@@ -954,14 +954,14 @@ mod tests {
         }];
         let mut leg = 0;
         assert!(matches!(
-            step_along(&state, &route, &mut leg, false, None).await,
+            step_along(&state, &route, &mut leg, false, None, false).await,
             Step::Waiting
         ));
         assert_eq!(leg, 0);
         assert!(rx.try_recv().is_err());
         crate::state::tests::synchronize_view(&mut *state.lock().await);
         assert!(matches!(
-            step_along(&state, &route, &mut leg, false, None).await,
+            step_along(&state, &route, &mut leg, false, None, false).await,
             Step::Sent(_)
         ));
         assert_eq!(leg, 1);
@@ -1304,6 +1304,7 @@ mod tests {
         s.self_player = Some(test_player(0.5, 0.5));
         s.self_player_id = Some(PlayerId::from(1));
         let floor = s.passability_floor();
+        crate::state::tests::synchronize_view(&mut s);
         let state = Arc::new(Mutex::new(s));
         let to = WalkTo::Place {
             x: 20.5,

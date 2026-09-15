@@ -1046,7 +1046,7 @@ async fn a_full_bag_must_not_park_forever_when_town_cannot_help() {
 
     // Nobody in sight from the centre, so the search walks the four quarters
     // before the town counts as empty — one look from the middle misses a
-    // merchant standing further out than NPC_SIGHT_RADIUS.
+    // merchant standing further out than EVENT_DELIVERY_RADIUS.
     macro_rules! stand_at {
         ($x:expr, $z:expr) => {
             state.lock().await.self_player.as_mut().unwrap().position = onlinerpg_shared::Position {
@@ -1115,7 +1115,8 @@ async fn a_full_bag_walks_into_town_and_sells() {
     rica.id = PlayerId::from(2);
     rica.name = "Rica".to_string();
     rica.is_official_npc = true;
-    s.nearby_players.insert(rica.id, rica);
+    // Not yet in `nearby_players`: the interest set only carries what's
+    // actually in range, and 300m out, Rica has not entered it yet.
     for _ in 0..40 {
         bag(&mut s, "iron_helmet", 1);
     }
@@ -1155,12 +1156,16 @@ async fn a_full_bag_walks_into_town_and_sells() {
         "a full bag must set off for town"
     );
 
-    // Walk done: the merchant is in sight, so the sale is the next turn.
-    state.lock().await.self_player.as_mut().unwrap().position = onlinerpg_shared::Position {
-        x: 0.0,
-        y: 0.0,
-        z: 0.0,
-    };
+    // Walk done: the merchant enters the interest set, so the sale is the next turn.
+    {
+        let mut s = state.lock().await;
+        s.self_player.as_mut().unwrap().position = onlinerpg_shared::Position {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        s.nearby_players.insert(rica.id, rica);
+    }
     let steps = tick!();
     assert!(
         steps
@@ -1196,7 +1201,7 @@ async fn a_merchant_across_town_is_found_instead_of_written_off() {
         },
     ];
     // Rica stands in the town's north-west quarter, 60m from the centre —
-    // inside the town, outside NPC_SIGHT_RADIUS of the anchor.
+    // inside the town, outside EVENT_DELIVERY_RADIUS of the anchor.
     let mut rica = test_player(-1540.0, 4720.0);
     rica.id = PlayerId::from(2);
     rica.name = "Rica".to_string();
