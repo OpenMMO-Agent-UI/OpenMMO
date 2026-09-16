@@ -649,7 +649,9 @@ async fn run_npc_session(
                 continue;
             }
             if !s.world_view.synchronized {
-                let _ = s.send_background_command(ClientMessage::ResyncWorld).await;
+                if s.take_resync_due() {
+                    let _ = s.send_background_command(ClientMessage::ResyncWorld).await;
+                }
                 continue;
             }
             s.check_music_finished();
