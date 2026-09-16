@@ -561,3 +561,31 @@ fn whispers_stay_urgent_and_background_chat_wakes_as_routine() {
         .iter()
         .any(|line| line.contains("Two please")));
 }
+
+#[test]
+fn a_resync_is_asked_once_per_window_and_not_at_all_right_after_join() {
+    let (mut state, _rx) = test_state();
+    state.push_event(ServerMessage::JoinSuccess {
+        player: test_player(0.0, 0.0),
+        is_admin: false,
+    });
+    assert!(!state.world_view.synchronized);
+    assert!(
+        !state.take_resync_due(),
+        "the join view gets time to arrive"
+    );
+
+    state.resync_due_at = None;
+    state.request_resync();
+    assert!(state.take_resync_due());
+    assert!(!state.take_resync_due(), "the answer gets time to arrive");
+    state.request_resync();
+    assert!(
+        !state.take_resync_due(),
+        "a repeat request waits out the window"
+    );
+
+    synchronize_view(&mut state);
+    state.resync_due_at = None;
+    assert!(!state.take_resync_due(), "nothing to ask for once in sync");
+}

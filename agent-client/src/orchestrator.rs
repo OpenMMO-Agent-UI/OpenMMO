@@ -622,9 +622,11 @@ async fn run_npc_session(
                 continue;
             }
             if !state.world_view.synchronized {
-                let _ = state
-                    .send_background_command(ClientMessage::ResyncWorld)
-                    .await;
+                if state.take_resync_due() {
+                    let _ = state
+                        .send_background_command(ClientMessage::ResyncWorld)
+                        .await;
+                }
                 continue;
             }
             state.check_music_finished();

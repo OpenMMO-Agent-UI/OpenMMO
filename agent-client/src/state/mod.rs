@@ -386,6 +386,10 @@ pub struct SharedState {
     pub world_view: onlinerpg_shared::interest::WorldView,
     pub pending_terrain: Vec<crate::terrain_snapshots::PendingTerrain>,
     pub terrain_notify: Arc<tokio::sync::Notify>,
+    /// When the next `ResyncWorld` may go out. Asking on every tick until
+    /// the join view landed queued dozens of resets that the server replayed
+    /// for a minute, each one cancelling the step the body was on.
+    pub resync_due_at: Option<std::time::Instant>,
     /// Current game time: is_night flag from server
     pub is_night: Option<bool>,
     /// The server's nightly clock, mirrored: `game_day + is_after_sunset`.
@@ -540,6 +544,7 @@ impl SharedState {
             splat_sampler,
             world_cache,
             world_view: Default::default(),
+            resync_due_at: None,
             pending_terrain: Vec::new(),
             terrain_notify: Arc::default(),
             is_night: None,
