@@ -375,6 +375,10 @@ pub struct SharedState {
     /// Shared world cache: passability + houses (shared across NPC connections)
     pub world_cache: Arc<std::sync::RwLock<WorldCache>>,
     pub world_view: onlinerpg_shared::interest::WorldView,
+    /// When the next `ResyncWorld` may go out. Asking on every tick until
+    /// the join view landed queued dozens of resets that the server replayed
+    /// for a minute, each one cancelling the step the body was on.
+    pub resync_due_at: Option<std::time::Instant>,
     pub pending_terrain: Vec<(String, u64, ServerMessage)>,
     /// Current game time: is_night flag from server
     pub is_night: Option<bool>,
@@ -534,6 +538,7 @@ impl SharedState {
             splat_sampler,
             world_cache,
             world_view: Default::default(),
+            resync_due_at: None,
             pending_terrain: Vec::new(),
             is_night: None,
             night_epoch: None,
