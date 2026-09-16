@@ -16,6 +16,10 @@ use onlinerpg_shared::fishing::{auto_stance, FishingAction, HOOK_REACTION_MS, ST
 use std::ops::RangeInclusive;
 use std::time::Duration;
 
+/// The server opens a view at join unasked; give it this long to arrive.
+const RESYNC_GRACE: Duration = Duration::from_secs(3);
+const RESYNC_RETRY: Duration = Duration::from_secs(3);
+
 impl SharedState {
     /// Hand the queued sick-room respawns to the driver, emptying the queue.
     pub fn drain_recent_respawns(&mut self) -> Vec<(String, u32)> {
@@ -288,16 +292,25 @@ impl SharedState {
         }
     }
 
-    /// Mark the world view stale and queue one `ResyncWorld` for it.
+    /// A request inside a running retry window waits for it: the server
+    /// answers every `ResyncWorld` with a full reset.
     pub fn request_resync(&mut self) {
         self.world_view.synchronized = false;
-        if !self
-            .pending_commands
-            .iter()
-            .any(|msg| matches!(msg, ClientMessage::ResyncWorld))
-        {
-            self.pending_commands.push(ClientMessage::ResyncWorld);
+        if self.resync_due_at.is_none() {
+            self.resync_due_at = Some(std::time::Instant::now());
         }
+    }
+
+    pub fn take_resync_due(&mut self) -> bool {
+        if self.world_view.synchronized {
+            return false;
+        }
+        let now = std::time::Instant::now();
+        if self.resync_due_at.is_some_and(|at| at > now) {
+            return false;
+        }
+        self.resync_due_at = Some(now + RESYNC_RETRY);
+        true
     }
 
     pub fn push_event(&mut self, msg: ServerMessage) -> EventUrgency {
@@ -438,6 +451,8 @@ impl SharedState {
                     self.world_cache.write().unwrap().remove_fence_view(id);
                 }
                 self.in_game = true;
+                self.world_view.synchronized = false;
+                self.resync_due_at = Some(std::time::Instant::now() + RESYNC_GRACE);
                 self.self_player_id = Some(player.id);
                 self.self_player = Some(player.clone());
                 self.self_mana = None;
