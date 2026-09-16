@@ -664,7 +664,21 @@ export function handleServerMessage(
           state.otherPlayers.clear()
           return state
         })
+        // The watched character is drawn as a remote player; the reset that
+        // wipes them all must leave it standing where it was, or every move
+        // after it targets a body that is no longer there.
+        const watched = isObserver ? get(gameStore).currentPlayer : null
+        const drawnAt = watched
+          ? remotePlayerManager.players.get(watched.id)
+          : undefined
         remotePlayerManager.reset()
+        if (watched) {
+          remotePlayerManager.initPlayer(
+            watched.id,
+            drawnAt?.position ?? watched.position,
+            drawnAt?.rotation ?? watched.rotation
+          )
+        }
         monsterManager.reset()
         groundItemManager.reset()
         campfireManager.reset()
