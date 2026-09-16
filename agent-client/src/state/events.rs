@@ -288,6 +288,18 @@ impl SharedState {
         }
     }
 
+    /// Mark the world view stale and queue one `ResyncWorld` for it.
+    pub fn request_resync(&mut self) {
+        self.world_view.synchronized = false;
+        if !self
+            .pending_commands
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::ResyncWorld))
+        {
+            self.pending_commands.push(ClientMessage::ResyncWorld);
+        }
+    }
+
     pub fn push_event(&mut self, msg: ServerMessage) -> EventUrgency {
         if let ServerMessage::WorldUpdate {
             world_epoch,
@@ -304,13 +316,8 @@ impl SharedState {
                 .world_view
                 .accept(world_epoch, *generation, *sequence, *reset, events)
             {
-                if !self.world_view.synchronized
-                    && !self
-                        .pending_commands
-                        .iter()
-                        .any(|msg| matches!(msg, ClientMessage::ResyncWorld))
-                {
-                    self.pending_commands.push(ClientMessage::ResyncWorld);
+                if !self.world_view.synchronized {
+                    self.request_resync();
                 }
                 return EventUrgency::Noise;
             }
@@ -320,8 +327,7 @@ impl SharedState {
                 .unwrap()
                 .ensure_world_epoch(world_epoch)
             {
-                self.world_view.synchronized = false;
-                self.pending_commands.push(ClientMessage::ResyncWorld);
+                self.request_resync();
                 return EventUrgency::Noise;
             }
             self.world_view.synchronized = *ready;
@@ -409,14 +415,7 @@ impl SharedState {
                     .unwrap()
                     .view_complete(viewer, &self.world_view)
                 {
-                    self.world_view.synchronized = false;
-                    if !self
-                        .pending_commands
-                        .iter()
-                        .any(|msg| matches!(msg, ClientMessage::ResyncWorld))
-                    {
-                        self.pending_commands.push(ClientMessage::ResyncWorld);
-                    }
+                    self.request_resync();
                 }
             }
             return urgency;
@@ -472,8 +471,7 @@ impl SharedState {
                     .last_correction_at
                     .is_some_and(|at| at.elapsed().as_secs() < 3)
                 {
-                    self.world_view.synchronized = false;
-                    self.pending_commands.push(ClientMessage::ResyncWorld);
+                    self.request_resync();
                 }
                 self.last_correction_at = Some(std::time::Instant::now());
                 self.relocate_self(*position, *rotation, *floor_level);
