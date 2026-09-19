@@ -1,9 +1,19 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { initSync } from '../wasm/onlinerpg_shared'
 import { gameStore } from '../stores/gameStore'
 import { setObservedPlayerId } from '../stores/observerStore'
 import { remotePlayerManager } from './remotePlayerManager'
 
 const ID = 11
+
+beforeAll(() => {
+  initSync({
+    module: readFileSync(
+      new URL('../wasm/onlinerpg_shared_bg.wasm', import.meta.url)
+    ),
+  })
+})
 
 function watch(mounted: boolean) {
   setObservedPlayerId(ID)
