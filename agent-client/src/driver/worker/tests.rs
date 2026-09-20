@@ -51,7 +51,6 @@ fn monster(id: &str, kind: &str, x: f32, z: f32) -> Monster {
         position: onlinerpg_shared::Position { x, y: 0.0, z },
         rotation: 0.0,
         state: MonsterState::Idle,
-        owner_id: None,
         health: 10,
         max_health: 10,
         floor_level: 0,
@@ -59,9 +58,6 @@ fn monster(id: &str, kind: &str, x: f32, z: f32) -> Monster {
         aggressive: false,
         lifecycle: Default::default(),
         last_attack_at: 0,
-        last_move_at: 0,
-        move_budget: 0.0,
-        owner_since: 0,
     }
 }
 
@@ -456,11 +452,8 @@ fn a_wounded_monster_further_out_does_not_outrank_what_is_underfoot() {
 }
 
 #[test]
-fn the_fighter_leaves_someone_elses_dead_and_off_floor_monsters_alone() {
+fn the_fighter_leaves_dead_and_off_floor_monsters_alone() {
     let mut s = state_at(0.0, 0.0);
-    let mut owned = monster("owned", "kobold", 1.0, 0.0);
-    owned.owner_id = Some(PlayerId::from(99));
-    see(&mut s, owned);
     let mut dead = monster("dead", "kobold", 1.0, 0.0);
     dead.state = MonsterState::Dead;
     dead.health = 0;
@@ -502,23 +495,6 @@ fn a_distant_target_is_walked_up_to_before_it_is_attacked() {
     assert_eq!(
         fighter::step(&s, &cfg(), false, &mut fighter::Patrol::default()),
         vec![Step::Attack("kobold-near".into())]
-    );
-}
-
-/// `owner_id` is which client runs the monster's AI, not whose monster it
-/// is: the server hands the ambient monsters around us to our own
-/// connection, so refusing owned ones left the fighter standing in a field
-/// of 28 monsters with nothing it would touch.
-#[test]
-fn the_monsters_assigned_to_us_are_the_ones_to_fight() {
-    let mut s = state_at(0.0, 0.0);
-    let mut assigned = monster("mine", "kobold", 1.0, 0.0);
-    assigned.owner_id = s.self_player_id;
-    see(&mut s, assigned);
-
-    assert_eq!(
-        fighter::eligible_target(&s, &cfg()).as_deref(),
-        Some("mine")
     );
 }
 

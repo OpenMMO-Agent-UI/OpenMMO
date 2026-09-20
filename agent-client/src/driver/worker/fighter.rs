@@ -104,23 +104,14 @@ pub(crate) fn monster_level(m: &Monster) -> u32 {
 }
 
 /// Whether the fighter may start a fight with this monster: on our floor,
-/// not another player's, alive, and inside the level margin.
-///
-/// `owner_id` says which client simulates the monster's AI, not who it
-/// belongs to — the server assigns the ambient monsters around us to our own
-/// connection, so those are exactly the ones there are to fight. Only
-/// someone else's assignment is off limits.
+/// alive, and inside the level margin.
 ///
 /// Deliberately no anchor test: this is what `free_kill` asks, and something
 /// standing close enough to hit is worth hitting wherever we are. The leash
 /// belongs to `eligible_target`, which is what decides where to *walk*.
 pub(crate) fn is_eligible(s: &SharedState, cfg: &WorkerConfig, m: &Monster) -> bool {
     let my_level = s.self_player.as_ref().map_or(1, |p| p.level);
-    let mine_or_nobodys = m
-        .owner_id
-        .is_none_or(|owner| Some(owner) == s.self_player_id);
     m.floor_level == s.self_floor_level
-        && mine_or_nobodys
         && m.state != MonsterState::Dead
         && m.health > 0
         && monster_level(m) <= my_level + cfg.level_margin
