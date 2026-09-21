@@ -657,12 +657,12 @@ fn fisher_cfg() -> WorkerConfig {
     }
 }
 
-fn rica_in_sight(s: &mut SharedState) {
-    let mut rica = test_player(3.0, 0.0);
-    rica.id = PlayerId::from(2);
-    rica.name = "Rica".to_string();
-    rica.is_official_npc = true;
-    s.nearby_players.insert(rica.id, rica);
+fn tobin_in_sight(s: &mut SharedState) {
+    let mut tobin = test_player(3.0, 0.0);
+    tobin.id = PlayerId::from(2);
+    tobin.name = "Tobin".to_string();
+    tobin.is_official_npc = true;
+    s.nearby_players.insert(tobin.id, tobin);
 }
 
 #[test]
@@ -676,7 +676,7 @@ fn a_fisher_without_a_rod_goes_to_town_and_buys_one() {
         "a fighter has no use for a rod"
     );
 
-    rica_in_sight(&mut s);
+    tobin_in_sight(&mut s);
     let labels = labels::BagLabels::default();
     assert!(town_business(&s, &fisher_cfg(), &labels)
         .iter()
@@ -708,7 +708,7 @@ fn a_fisher_without_a_rod_goes_to_town_and_buys_one() {
 #[test]
 fn a_rod_the_purse_cannot_cover_is_not_ordered() {
     let mut s = state_at(0.0, 0.0);
-    rica_in_sight(&mut s);
+    tobin_in_sight(&mut s);
     s.self_gold = Some(1);
     assert_eq!(rod_to_buy(&s, &fisher_cfg()), None);
     assert_eq!(
