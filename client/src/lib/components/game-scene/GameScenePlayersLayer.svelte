@@ -18,6 +18,7 @@
     type EnchantLight,
   } from '../../utils/enchantLight'
   import PlayerControl from '../PlayerControl.svelte'
+  import { isObserver } from '../../stores/observerStore'
   import type { PlayerControlEvent } from '../player-control/events'
   import type {
     ChatBubble,
@@ -60,6 +61,7 @@
   import {
     localHeadLight,
     localTorchEquipped,
+    shieldGlowLit,
   } from '../../stores/inventoryStore'
   import { givesLight } from '../../data/itemDefs'
   import { LIGHT_WAKE, LIGHT_FADE } from '../../effects/radiance'
@@ -442,7 +444,7 @@
         scale: CAMPFIRE_INTENSITY_SCALE,
       }
     }
-    const localTorch = get(localTorchEquipped)
+    const localTorch = get(localTorchEquipped) || get(shieldGlowLit)
     const localRadiance = radianceStrengths.get(currentPlayer.id) ?? 0
     if (localTorch || localRadiance > 0) {
       const p = currentPlayer.position
@@ -647,7 +649,9 @@
       : (remotePlayers.get(id)?.rotation ?? 0)}
 />
 
-{#if camera && currentPlayer}
+<!-- A spectator has no input and no movement of its own: the agent's
+     position arrives over the mirror. -->
+{#if camera && currentPlayer && !isObserver}
   <PlayerControl
     bind:this={playerControl}
     {waterSurfaceAt}
