@@ -27,6 +27,9 @@
     ROOF_OVERHANG,
   } from '../../utils/house-geo-utils'
   import { getWallByDir } from '../../managers/housingManager'
+  import { ALL_WALL_DIRS } from '../../managers/housing-passability'
+  import { isoCameraOccludesPlayer } from '../../utils/iso-occlusion'
+  import { facesCamera } from '../../utils/view-direction'
   import { housingManager } from '../../managers/housingManager'
   import { resolveHouseInterior } from '../../managers/housing-queries'
   import { furnitureManager } from '../../managers/furnitureManager'
@@ -55,6 +58,7 @@
   let currentInsideHouseId: string | null = null
   let playerInsideFloor = 0
   let renderedInsideFloor = 0
+  let renderedFacing = ''
   let wasOnStairs = false
   // eslint-disable-next-line svelte/prefer-svelte-reactivity
   const occludedHouseIds = new Set<string>()
@@ -318,11 +322,13 @@
     }
     wasOnStairs = onStairsNow
 
-    // Update visibility when house or floor changes
+    // Update visibility when house, floor or the camera's side changes
+    const facing = facingKey()
     if (
       insideId !== currentInsideHouseId ||
       effectiveFloor !== playerInsideFloor ||
-      effectiveFloor !== renderedInsideFloor
+      effectiveFloor !== renderedInsideFloor ||
+      facing !== renderedFacing
     ) {
       // Restore previous house
       if (currentInsideHouseId) {
@@ -343,6 +349,7 @@
       currentInsideHouseId = insideId
       playerInsideFloor = effectiveFloor
       renderedInsideFloor = effectiveFloor
+      renderedFacing = facing
       playerVisualFloorLevel.set(effectiveFloor)
       playerInsideHouseId.set(insideId)
     }
@@ -401,18 +408,21 @@
   }
 
   /**
-   * Hide front/back groups based on player floor.
-   * Current floor: hide front (south+west walls, roof)
-   * Higher floors: hide front, back, and floor; keep stair visible
+   * Hide wall groups based on player floor.
+   * Current floor: hide the roof and the walls facing the camera
+   * Higher floors: hide every wall, the roof and the floor; keep stair visible
    * Lower floors: fully visible
    */
   function applyFloorVisibility(result: HouseGroupResult, floor: number) {
     for (const [fl, groups] of result.floorGroups) {
       if (fl === floor) {
-        groups.front.position.y = OFFSCREEN_Y
+        groups.roof.position.y = OFFSCREEN_Y
+        for (const dir of ALL_WALL_DIRS)
+          if (facesCamera(dir)) groups.walls[dir].position.y = OFFSCREEN_Y
       } else if (fl > floor) {
-        groups.front.position.y = OFFSCREEN_Y
-        groups.back.position.y = OFFSCREEN_Y
+        groups.roof.position.y = OFFSCREEN_Y
+        for (const dir of ALL_WALL_DIRS)
+          groups.walls[dir].position.y = OFFSCREEN_Y
         groups.floor.position.y = OFFSCREEN_Y
         for (const w of groups.interior) w.group.position.y = OFFSCREEN_Y
       }
@@ -422,8 +432,8 @@
 
   function resetAllFloorGroupPositions(result: HouseGroupResult) {
     for (const [, groups] of result.floorGroups) {
-      groups.front.position.y = 0
-      groups.back.position.y = 0
+      groups.roof.position.y = 0
+      for (const dir of ALL_WALL_DIRS) groups.walls[dir].position.y = 0
       groups.floor.position.y = 0
       groups.stair.position.y = 0
       for (const w of groups.interior) w.group.position.y = 0
@@ -437,42 +447,28 @@
   }
 
   /**
-   * Check if a house occludes the player from the isometric SW camera.
-   *
-   * Camera pitch = atan(1/√2), forward in XZ = (1,0,−1)/√2.
-   * A camera ray from (px, py, pz) toward the camera hits a room volume
-   * iff there exists s ∈ [sLow, sHigh] such that the room footprint shifted
-   * by (s, −s) in XZ contains (px, pz).
-   *
-   *   sHigh = aabb.max.y − py  (top of room vs player height)
-   *   sLow  = max(aabb.min.y − py, 0)
-   *
-   * Tests each room AABB rather than the merged house AABB so that
-   * concave shapes (L/T/U) don't falsely occlude when the player stands
-   * in the outdoor concave gap — the ray passes through the gap and
-   * misses every room.
-   *
-   * Requires MIN_OCCLUSION_DEPTH of ray inside the AABB before counting
-   * it as occluding. The AABB extends ROOF_OVERHANG past walls, so a
-   * player standing right at a wall grazes the AABB without the wall
-   * actually being between them and the camera.
+   * Whether any room of a house stands between the player and the camera.
+   * Tests each room AABB rather than the merged house AABB so that concave
+   * shapes (L/T/U) don't falsely occlude when the player stands in the
+   * outdoor concave gap. The AABB extends ROOF_OVERHANG past walls, so the
+   * ray must run MIN_OCCLUSION_DEPTH inside before it counts: a player
+   * standing right at a wall only grazes it.
    */
   const MIN_OCCLUSION_DEPTH = ROOF_OVERHANG + WALL_THICKNESS
+
+  /** The wall sides turned toward the camera, e.g. `south,west`. */
+  function facingKey(): string {
+    return ALL_WALL_DIRS.filter(facesCamera).join(',')
+  }
   function houseOccludesPlayer(
     roomAABBs: THREE.Box3[],
     px: number,
     py: number,
     pz: number
   ): boolean {
-    for (const aabb of roomAABBs) {
-      const sHigh = aabb.max.y - py
-      if (sHigh <= 0) continue
-      const sLow = Math.max(aabb.min.y - py, 0)
-      const sMin = Math.max(px - aabb.max.x, aabb.min.z - pz, sLow)
-      const sMax = Math.min(px - aabb.min.x, aabb.max.z - pz, sHigh)
-      if (sMax - sMin > MIN_OCCLUSION_DEPTH) return true
-    }
-    return false
+    return roomAABBs.some((aabb) =>
+      isoCameraOccludesPlayer(aabb, px, py, pz, MIN_OCCLUSION_DEPTH)
+    )
   }
 
   const _noop = () => {}
@@ -498,8 +494,8 @@
   // Toggling .visible avoids matrixWorld recalculations on occlusion changes.
   function applyOcclusionVisibility(result: HouseGroupResult) {
     for (const [fl, groups] of result.floorGroups) {
-      groups.front.visible = false
-      groups.back.visible = false
+      groups.roof.visible = false
+      for (const dir of ALL_WALL_DIRS) groups.walls[dir].visible = false
       groups.stair.visible = false
       for (const w of groups.interior) w.group.visible = false
       if (fl !== 0) {
@@ -514,8 +510,8 @@
 
   function resetOcclusionVisibility(result: HouseGroupResult) {
     for (const [, groups] of result.floorGroups) {
-      groups.front.visible = true
-      groups.back.visible = true
+      groups.roof.visible = true
+      for (const dir of ALL_WALL_DIRS) groups.walls[dir].visible = true
       groups.floor.visible = true
       groups.stair.visible = true
       for (const w of groups.interior) w.group.visible = true
