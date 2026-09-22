@@ -9,6 +9,9 @@
   import RenameCharacterDialog from './lib/components/RenameCharacterDialog.svelte'
   import { gameStore } from './lib/stores/gameStore'
   import { localStr } from './lib/stores/inventoryStore'
+  import { isObserver } from './lib/stores/observerStore'
+  import { decodeManualBootstrap } from './lib/stores/manualBootstrap'
+  import { spectatorHasEnteredWorld } from './lib/stores/spectatorReadiness'
   import {
     networkManager,
     type AccountCharacter,
@@ -16,7 +19,8 @@
     type CharacterAppearance,
     type Gender,
   } from './lib/network/socket'
-  import { bgmMuted, startBgm } from './lib/managers/bgmManager'
+  import { startBgm, bgmVolume, bgmMuted } from './lib/managers/bgmManager'
+  import { sfxVolume, sfxMuted } from './lib/managers/sfxManager'
   import SettingsPanel from './lib/components/SettingsPanel.svelte'
   import { runGpuBenchmark } from './lib/utils/gpuBenchmark'
   import {
@@ -29,6 +33,7 @@
   let showSettings = $state(false)
   let SceneCanvas = $state<typeof SceneCanvasComponent>()
   let gameScreen = $state<typeof import('./lib/components/game-screen')>()
+  const manualBootstrap = decodeManualBootstrap(window.location.hash)
 
   type AppScreen = 'login' | 'character-select' | 'character-create' | 'game'
   type DeathUiState =
@@ -36,7 +41,10 @@
     | 'waiting_dying'
     | 'dialog_open'
     | 'dialog_closed'
-  let screen = $state<AppScreen>('login')
+  let screen = $state<AppScreen>(
+    isObserver || manualBootstrap ? 'game' : 'login'
+  )
+  let observerError = $state('')
   let serverUrl = $state('')
   let accountName = $state('')
   let accountCharacters = $state<AccountCharacter[]>([])
@@ -53,6 +61,22 @@
   let isPlayerDead = $state(false)
   let currentPlayerHp = $state<number | null>(null)
   let currentPlayerMaxHp = $state<number | null>(null)
+
+  /// Connected to the mirror but the agent has not entered the world yet.
+  let observerWaiting = $derived(
+    (isObserver || manualBootstrap !== null) &&
+      !observerError &&
+      !spectatorHasEnteredWorld(currentPlayerHp)
+  )
+  /// Normal play only reaches the game screen after JoinSuccess, so the scene
+  /// mounts knowing where it is. A spectator opens straight onto 'game', and
+  /// building the world around the origin first — then restreaming every tile
+  /// once the real position arrives — keeps frame times over the threshold
+  /// that dismisses the loading dialog. Wait for the character instead.
+  let sceneCanMount = $derived(
+    (!isObserver && !manualBootstrap) ||
+      spectatorHasEnteredWorld(currentPlayerHp)
+  )
   let currentPlayerLevel = $state<number | null>(null)
   let currentPlayerTotalXp = $state<number | null>(null)
   let deathUiState = $state<DeathUiState>('alive')
@@ -95,6 +119,111 @@
       bgmMuted.update((m) => !m)
     }
   }
+
+  // Spectator: there is no login and no character to pick — connect to the
+  // agent's mirror and draw whatever it is seeing.
+  onMount(() => {
+    if (!isObserver) return
+    void networkManager.observe().then((result) => {
+      if (!result.ok) observerError = result.message ?? 'Agent is not reachable'
+    })
+  })
+
+  // Both of this fork's entry points — the spectator view (`?observe=`) and
+  // desktop manual play (`#manual=`) — start at `screen = 'game'` without
+  // going through handleStartGame, which is the only place that imports the
+  // game screen. Upstream made that module lazy in f8ea75f8 ("Improve client
+  // loading with lazy screens and cached bundles"); our patch rebased onto it
+  // without a conflict and silently stopped rendering, because
+  // `{#if screen === 'game' && gameScreen}` then falls all the way through to
+  // the login screen. A spectator watched their character move while being
+  // told sign-in was unavailable.
+  onMount(async () => {
+    if (!isObserver && !manualBootstrap) return
+    try {
+      // Both of them. f8ea75f8 made two modules lazy and put each behind a
+      // different step of the character-select flow — game-screen in
+      // handleStartGame, SceneCanvas in handleLogin — and these paths call
+      // neither. Loading only the first still left the scene unmounted, so
+      // `isSceneCompiling` never cleared and the view sat on "Preparing
+      // world..." forever.
+      ;[gameScreen, SceneCanvas] = await Promise.all([
+        gameScreen ?? import('./lib/components/game-screen'),
+        SceneCanvas ??
+          import('./lib/components/SceneCanvas.svelte').then((m) => m.default),
+      ])
+    } catch (error) {
+      console.error('Unable to load game screen', error)
+      observerError = $t('loading.failed')
+    }
+  })
+
+  // Desktop manual mode already completed OAuth and character selection.
+  // Consume the short-lived fragment once, clear it from browser history, and
+  // enter that exact character without rendering duplicate onboarding.
+  onMount(() => {
+    if (!manualBootstrap || isObserver) return
+    history.replaceState(null, '', `${location.pathname}${location.search}`)
+    void networkManager
+      .requestAuthentication(
+        manualBootstrap.serverUrl,
+        manualBootstrap.googleIdToken
+      )
+      .then(async (authenticated) => {
+        if (!authenticated.ok) {
+          observerError = authenticated.message ?? 'Authentication failed'
+          window.parent.postMessage(
+            { type: 'openmmo-manual-error', error: observerError },
+            '*'
+          )
+          return
+        }
+        serverUrl = manualBootstrap.serverUrl
+        accountName = authenticated.accountName ?? ''
+        accountCharacters = authenticated.characters ?? []
+        selectedCharacterId = manualBootstrap.characterId
+        const entered = await networkManager.requestEnterGame(
+          manualBootstrap.characterId
+        )
+        if (!entered.ok) {
+          observerError = entered.message ?? 'Could not enter the game'
+          window.parent.postMessage(
+            { type: 'openmmo-manual-error', error: observerError },
+            '*'
+          )
+          return
+        }
+        window.parent.postMessage({ type: 'openmmo-manual-ready' }, '*')
+      })
+      .catch((error: unknown) => {
+        observerError =
+          error instanceof Error ? error.message : 'Could not enter the game'
+        window.parent.postMessage(
+          { type: 'openmmo-manual-error', error: observerError },
+          '*'
+        )
+      })
+  })
+
+  // Desktop app's Settings > Audio tab: its own window is a different origin
+  // (file://) with no access to this page's localStorage, so it relays
+  // volume/mute changes here instead of setting them directly.
+  onMount(() => {
+    if (!isObserver && !manualBootstrap) return
+    const onAudioMessage = (event: MessageEvent) => {
+      if (event.data?.type !== 'openmmo-set-audio') return
+      if (typeof event.data.bgmVolume === 'number')
+        bgmVolume.set(event.data.bgmVolume)
+      if (typeof event.data.bgmMuted === 'boolean')
+        bgmMuted.set(event.data.bgmMuted)
+      if (typeof event.data.sfxVolume === 'number')
+        sfxVolume.set(event.data.sfxVolume)
+      if (typeof event.data.sfxMuted === 'boolean')
+        sfxMuted.set(event.data.sfxMuted)
+    }
+    window.addEventListener('message', onAudioMessage)
+    return () => window.removeEventListener('message', onAudioMessage)
+  })
 
   onMount(() => {
     if (!gpuProbePending) return
@@ -400,10 +529,18 @@
           serverUrl,
           onCurrentPlayerDyingFinished: handleCurrentPlayerDyingFinished,
         }}
-        GameScene={gameScreen?.GameScene}
+        GameScene={sceneCanMount ? gameScreen?.GameScene : undefined}
         bind:isCurrentPlayerLoading
         bind:isSceneCompiling
       />
+    </div>
+  {/if}
+
+  {#if observerError}
+    <div class="observer-error">{observerError}</div>
+  {:else if observerWaiting}
+    <div class="observer-waiting">
+      Waiting for the agent to enter the world…
     </div>
   {/if}
 
@@ -565,5 +702,31 @@
   .settings-btn-corner svg {
     width: 20px;
     height: 20px;
+  }
+
+  .observer-waiting {
+    position: fixed;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10000;
+    padding: 10px 16px;
+    border-radius: 8px;
+    background: rgba(30, 34, 44, 0.9);
+    color: #b9c1d2;
+    font-size: 14px;
+  }
+
+  .observer-error {
+    position: fixed;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10000;
+    padding: 10px 16px;
+    border-radius: 8px;
+    background: rgba(120, 30, 30, 0.92);
+    color: #ffd9d9;
+    font-size: 14px;
   }
 </style>
