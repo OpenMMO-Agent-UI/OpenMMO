@@ -19,6 +19,7 @@ import {
   type GeoEntry,
   type RoofSpan,
   type RoomFootprint,
+  type WallDirection,
 } from './house-geo-utils'
 import {
   ROOF_COURSE_V,
@@ -147,13 +148,13 @@ export function shouldSuppressRoof(
 export function collectRoofGeometry(
   room: RoomData,
   span: RoofSpan | undefined,
-  frontTarget: GeoEntry[],
-  backTarget: GeoEntry[],
+  roofTarget: GeoEntry[],
+  gableTarget: (end: WallDirection) => GeoEntry[],
   allRooms: RoomData[],
   style: ResolvedHouseStyle | null = null
 ) {
   if (!span) {
-    collectFlatRoof(room, frontTarget)
+    collectFlatRoof(room, roofTarget)
     return
   }
   if (span.rooms[0] !== room) return
@@ -164,7 +165,7 @@ export function collectRoofGeometry(
     sizeX: span.sizeX,
     sizeZ: span.sizeZ,
   }
-  collectGabledRoof(spanRoom, span, frontTarget, backTarget, allRooms, style)
+  collectGabledRoof(spanRoom, span, roofTarget, gableTarget, allRooms, style)
 }
 
 /** True when `other`'s wall line meets `room`'s gable end at `end`. */
@@ -264,8 +265,8 @@ function collectFlatRoof(room: RoomData, target: GeoEntry[]) {
 function collectGabledRoof(
   room: RoomData,
   span: RoofSpan,
-  frontTarget: GeoEntry[],
-  backTarget: GeoEntry[],
+  roofTarget: GeoEntry[],
+  gableTarget: (end: WallDirection) => GeoEntry[],
   allRooms: RoomData[],
   style: ResolvedHouseStyle | null
 ) {
@@ -345,7 +346,7 @@ function collectGabledRoof(
     _roofMatrix.makeTranslation(tx, yCenter, tz)
     geo.applyMatrix4(_roofMatrix)
 
-    frontTarget.push({
+    roofTarget.push({
       geo,
       textureIndex: roofIdx,
       outdoor: true,
@@ -373,7 +374,7 @@ function collectGabledRoof(
       const courses = Math.max(1, Math.round(slopeLen / COURSE_SPACING))
       const run = slopeLen / courses
       for (let i = 0; i < courses; i++) {
-        frontTarget.push({
+        roofTarget.push({
           geo: onSlope(
             courseWedge(
               ridgeLen,
@@ -396,7 +397,7 @@ function collectGabledRoof(
       }
 
       if (sideOh > 0) {
-        frontTarget.push({
+        roofTarget.push({
           geo: onSlope(
             new THREE.BoxGeometry(ridgeLen, FASCIA_HEIGHT, FASCIA_THICKNESS),
             frame,
@@ -411,7 +412,7 @@ function collectGabledRoof(
 
       for (const end of [-1, 1] as const) {
         if ((end === -1 ? extLow : extHigh) > 0) continue
-        frontTarget.push({
+        roofTarget.push({
           geo: onSlope(
             new THREE.BoxGeometry(BARGE_THICKNESS, BARGE_HEIGHT, slopeLen),
             frame,
@@ -432,7 +433,7 @@ function collectGabledRoof(
       8
     )
     cap.rotateZ(Math.PI / 2)
-    frontTarget.push({
+    roofTarget.push({
       geo: bakedGeo(
         cap,
         ridgeX,
@@ -450,7 +451,7 @@ function collectGabledRoof(
     for (const end of [-1, 1] as const) {
       if ((end === -1 ? extLow : extHigh) > 0) continue
       const a = end * (ridgeLen / 2 + BARGE_THICKNESS / 2)
-      frontTarget.push({
+      roofTarget.push({
         geo: bakedGeo(
           new THREE.BoxGeometry(FINIAL_SIZE, FINIAL_HEIGHT, FINIAL_SIZE),
           ridgeX + (ridgeAlongX ? a : 0),
@@ -474,7 +475,7 @@ function collectGabledRoof(
       const top = apexY + CHIMNEY_RISE
       const x = cx + (ridgeAlongX ? a : perp)
       const z = cz + (ridgeAlongX ? perp : a)
-      frontTarget.push({
+      roofTarget.push({
         geo: bakedGeo(
           new THREE.BoxGeometry(CHIMNEY_SIZE, top - bottom, CHIMNEY_SIZE),
           x,
@@ -486,7 +487,7 @@ function collectGabledRoof(
         ),
         textureIndex: STYLE_TEX.stone,
       })
-      frontTarget.push({
+      roofTarget.push({
         geo: bakedGeo(
           new THREE.BoxGeometry(CHIMNEY_SIZE + 0.16, 0.12, CHIMNEY_SIZE + 0.16),
           x,
@@ -599,8 +600,14 @@ function collectGabledRoof(
     geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3))
     geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2))
 
-    const isFront = ridgeAlongX ? endSign === -1 : endSign === 1
-    const target = isFront ? frontTarget : backTarget
+    const end: WallDirection = ridgeAlongX
+      ? endSign === -1
+        ? 'west'
+        : 'east'
+      : endSign === 1
+        ? 'south'
+        : 'north'
+    const target = gableTarget(end)
     target.push({
       geo,
       textureIndex: gableTexIdx,
@@ -612,9 +619,9 @@ function collectGabledRoof(
       const faceZ = cz + (ridgeAlongX ? 0 : endOffset)
       const beamRotY = ridgeAlongX ? Math.PI / 2 : 0
 
-      // Base beam — front group so it hides with the roof when player is inside
+      // Base beam — hides with the roof when the player is inside
       const beamWidth = halfShort * 2
-      frontTarget.push({
+      roofTarget.push({
         geo: bakedGeo(
           new THREE.BoxGeometry(beamWidth, GABLE_BEAM_HEIGHT, FRAME_DEPTH),
           faceX,
