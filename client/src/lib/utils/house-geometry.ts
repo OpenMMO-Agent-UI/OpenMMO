@@ -1,11 +1,12 @@
 /**
  * house-geometry.ts — Assembles a THREE.Group from HouseData.
  *
- * Geometries are grouped by (isFront, textureIndex) and merged into one mesh
+ * Geometries are grouped by part and textureIndex and merged into one mesh
  * per group. Each mesh uses a shared MeshStandardMaterial from housing-textures.ts.
  *
- * Front group: south walls + west walls + roofs (hidden when player is inside)
- * Back group:  north walls + east walls + floors (always visible)
+ * Walls are grouped by the way they face, so the ones turned toward the camera
+ * can be hidden when the player is inside whichever way the camera looks.
+ * Roofs are one group, hidden whenever the player is inside.
  */
 import * as THREE from 'three'
 import type { HouseData, RoomData } from '../types/housing'
@@ -17,15 +18,17 @@ import {
   type RoofSpan,
   getOrCreateFloorEntries,
   OFFSCREEN_Y,
-  WALL_DIR_INFO,
   type DoorMeshInfo,
   type FloorEntries,
+  type GeoEntry,
   type HouseGroupResult,
   type InteriorWall,
   type InteriorWallGroup,
   interiorWallOccludes,
   type RoomFootprint,
+  type WallDirection,
 } from './house-geo-utils'
+import { facesCamera } from './view-direction'
 import { ALL_WALL_DIRS, getWallByDir } from '../managers/housing-passability'
 import { setMeshGhost } from './housing-textures'
 import { collectFloorGeometry } from './house-geo-floor'
@@ -109,12 +112,18 @@ export function buildHouseGroup(
   const allDoors: DoorMeshInfo[] = []
 
   for (const [fl, entries] of perFloor) {
-    const front = new THREE.Group()
-    front.name = `front_f${fl}`
-    front.userData.housingSurface = 'wall'
-    const back = new THREE.Group()
-    back.name = `back_f${fl}`
-    back.userData.housingSurface = 'wall'
+    const wallGroup = (name: string, parts: GeoEntry[]) => {
+      const group = new THREE.Group()
+      group.name = `${name}_f${fl}`
+      group.userData.housingSurface = 'wall'
+      mergedMeshCount += addMergedMeshes(group, parts)
+      houseGroup.add(group)
+      return group
+    }
+    const walls = {} as Record<WallDirection, THREE.Group>
+    for (const dir of ALL_WALL_DIRS)
+      walls[dir] = wallGroup(`wall_${dir}`, entries.walls[dir])
+    const roof = wallGroup('roof', entries.roof)
     const floor = new THREE.Group()
     floor.name = `floor_f${fl}`
     floor.userData.housingSurface = 'floor'
@@ -123,8 +132,6 @@ export function buildHouseGroup(
     stair.name = `stair_f${fl}`
     stair.userData.housingSurface = 'floor'
     stair.userData.housingStairFloor = fl
-    mergedMeshCount += addMergedMeshes(front, entries.front)
-    mergedMeshCount += addMergedMeshes(back, entries.back)
     mergedMeshCount += addMergedMeshes(floor, entries.floor)
     mergedMeshCount += addMergedMeshes(stair, entries.stair)
     const interior: InteriorWallGroup[] = []
@@ -141,11 +148,9 @@ export function buildHouseGroup(
       allDoors.push(door)
     }
 
-    houseGroup.add(front)
-    houseGroup.add(back)
     houseGroup.add(floor)
     houseGroup.add(stair)
-    floorGroups.set(fl, { front, back, floor, stair, interior })
+    floorGroups.set(fl, { walls, roof, floor, stair, interior })
   }
 
   for (const door of allDoors) {
@@ -197,7 +202,13 @@ function collectRoomGeometries(
 
   collectFloorGeometry(room, entries.floor, stairwellFootprints)
   if (!suppressRoof)
-    collectRoofGeometry(room, roofSpan, entries.front, entries.back, allRooms)
+    collectRoofGeometry(
+      room,
+      roofSpan,
+      entries.roof,
+      (end) => entries.walls[end],
+      allRooms
+    )
 
   for (const dir of ALL_WALL_DIRS)
     collectWallSegments(
@@ -216,14 +227,17 @@ export function applyDoorGhostMaterials(
   floor: number
 ) {
   for (const door of result.doors) {
-    const isFront = WALL_DIR_INFO[door.wallDir].isFront
     if (door.floorLevel > floor) {
       // Hide upper floor doors/windows entirely
       if (door.pivot.userData.originalPosY === undefined) {
         door.pivot.userData.originalPosY = door.pivot.position.y
       }
       door.pivot.position.y = OFFSCREEN_Y
-    } else if (door.floorLevel === floor && isFront && !door.interior) {
+    } else if (
+      door.floorLevel === floor &&
+      facesCamera(door.wallDir) &&
+      !door.interior
+    ) {
       setMeshGhost(door.pivot.children[0] as THREE.Mesh, true)
     }
   }

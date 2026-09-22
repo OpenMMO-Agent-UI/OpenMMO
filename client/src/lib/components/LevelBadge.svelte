@@ -17,11 +17,14 @@
     xp,
     hp,
     maxHp,
+    str,
   }: {
     level: number
     xp: number
     hp: number
     maxHp: number
+    /** Null for a spectator: rolled attributes never reach the mirror. */
+    str: number | null
   } = $props()
 
   const xpInfo = $derived(levelProgress(level, xp))
@@ -213,7 +216,11 @@
     <div class="gold"><GoldAmount copper={$playerGold} /></div>
     <div>
       <strong class="weight">{formatKg($carryWeight)}</strong>
-      <span> / {formatKg($carryLimit)} kg</span>
+      {#if str !== null}
+        <span> / {formatKg($carryLimit)} kg</span>
+      {:else}
+        <span> kg</span>
+      {/if}
     </div>
   </div>
 </button>
