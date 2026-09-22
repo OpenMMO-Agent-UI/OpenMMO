@@ -12,6 +12,7 @@
   import { snowyStandardMaterial } from '../../shaders/snow-cover-nodes'
   import { leafSeason } from '../../shaders/foliage-season-nodes'
   import { SvelteMap, SvelteSet } from 'svelte/reactivity'
+  import { viewRayRun, viewRevision } from '../../utils/view-direction'
 
   interface Props {
     terrainTiles: TerrainTile[]
@@ -168,11 +169,8 @@
   let lastOccPx = NaN
   let lastOccPy = NaN
   let lastOccPz = NaN
+  let lastOccView = -1
 
-  /**
-   * Same isometric ray-AABB test as houseOccludesPlayer.
-   * Ray from player toward camera: R(s) = (px − s, py + s, pz + s), s >= 0.
-   */
   function treeOccludesPlayer(
     tx: number,
     ty: number,
@@ -185,12 +183,10 @@
   ): boolean {
     const h = TREE_OCCLUDE_HEIGHT[typeIdx] * scale
     const hw = TREE_OCCLUDE_HALF_W[typeIdx] * scale
-    const sHigh = ty + h - py
-    if (sHigh <= 0) return false
-    const sLow = Math.max(ty - py, 0)
-    const sMin = Math.max(px - tx - hw, tz - hw - pz, sLow)
-    const sMax = Math.min(px - tx + hw, tz + hw - pz, sHigh)
-    return sMin <= sMax
+    return (
+      viewRayRun(tx - hw, ty, tz - hw, tx + hw, ty + h, tz + hw, px, py, pz) >=
+      0
+    )
   }
 
   // ── Tile data cache ────────────────────────────────────
@@ -351,7 +347,9 @@
     const dx = px - lastOccPx
     const dy = py - lastOccPy
     const dz = pz - lastOccPz
-    if (dx * dx + dy * dy + dz * dz < 0.01) return
+    if (dx * dx + dy * dy + dz * dz < 0.01 && lastOccView === viewRevision)
+      return
+    lastOccView = viewRevision
     lastOccPx = px
     lastOccPy = py
     lastOccPz = pz

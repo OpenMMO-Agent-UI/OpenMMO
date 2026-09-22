@@ -1,5 +1,14 @@
 import * as THREE from 'three'
-import { addMergedMeshes, type GeoEntry } from './house-geo-utils'
+import {
+  addMergedMeshes,
+  type GeoEntry,
+  type WallDirection,
+} from './house-geo-utils'
+import {
+  quadrantsOf,
+  VIEW_QUADRANTS,
+  type ViewQuadrant,
+} from './view-direction'
 import { getGhostHousingMaterial, getHousingMaterial } from './housing-textures'
 import type {
   DungeonFloorLayout,
@@ -48,8 +57,9 @@ export interface WallRun {
   weathering?: THREE.Mesh
   /** Group-local AABB; the layer adds the floor group's world position. */
   localAABB: THREE.Box3
-  /** South/west walls in a room or connected corridor corner fade together. */
-  fadeGroup: number
+  /** Per view quadrant, the walls of a room or connected corridor corner that
+   *  fade together; -1 where this wall is not one the quadrant looks at. */
+  fadeGroups: Record<ViewQuadrant, number>
 }
 
 export interface DungeonFloorGroup {
@@ -227,7 +237,7 @@ export function buildDungeonFloorGroup(
     cx: number,
     cy: number,
     cz: number,
-    fadeGroup = -1,
+    fadeGroups: Record<ViewQuadrant, number>,
     inward = 1
   ) => {
     let geo: THREE.BufferGeometry
@@ -295,30 +305,45 @@ export function buildDungeonFloorGroup(
       ghostMesh,
       weathering,
       localAABB: geo.boundingBox!.clone(),
-      fadeGroup,
+      fadeGroups,
     })
   }
-  // Corridor groups join at grid corners, independent of wall thickness.
-  const corridorParents = new Map<number, number>()
-  const resolveFadeGroup = (id: number): number => {
-    const parent = corridorParents.get(id)
+  // Corridor groups join at grid corners, independent of wall thickness, and
+  // only among the two sides one view quadrant looks at: joined across all
+  // four, a corridor's walls would chain round into one group.
+  const corridorParents = Object.fromEntries(
+    VIEW_QUADRANTS.map((q) => [q, new Map<number, number>()])
+  ) as Record<ViewQuadrant, Map<number, number>>
+  const resolveFadeGroup = (q: ViewQuadrant, id: number): number => {
+    const parents = corridorParents[q]
+    const parent = parents.get(id)
     if (parent === undefined) return id
-    const group = resolveFadeGroup(parent)
-    corridorParents.set(id, group)
+    const group = resolveFadeGroup(q, parent)
+    parents.set(id, group)
     return group
   }
-  const wallFadeGroup = (
+  const wallFadeGroups = (
+    side: WallDirection,
     room: number,
     x0: number,
     z0: number,
     x1: number,
     z1: number
-  ): number => {
-    if (room >= 0) return room
-    const start = resolveFadeGroup(layout.rooms.length + x0 + z0 * (grid + 1))
-    const end = resolveFadeGroup(layout.rooms.length + x1 + z1 * (grid + 1))
-    if (start !== end) corridorParents.set(end, start)
-    return start
+  ): Record<ViewQuadrant, number> => {
+    const groups = { sw: -1, nw: -1, ne: -1, se: -1 }
+    for (const q of quadrantsOf(side)) {
+      if (room >= 0) {
+        groups[q] = room
+        continue
+      }
+      const corner = (x: number, z: number) =>
+        resolveFadeGroup(q, layout.rooms.length + x + z * (grid + 1))
+      const start = corner(x0, z0)
+      const end = corner(x1, z1)
+      if (start !== end) corridorParents[q].set(end, start)
+      groups[q] = start
+    }
+    return groups
   }
 
   // Carved cells outside rooms use the corridor texture; shafts emit no walls.
@@ -367,7 +392,15 @@ export function buildDungeonFloorGroup(
           WALL_THICKNESS,
           lo + len / 2,
           ctx.wallHeight / 2 + SHADOW_CONTACT_LIFT,
-          z - WALL_HALF_THICKNESS
+          z - WALL_HALF_THICKNESS,
+          wallFadeGroups(
+            'north',
+            roomIndexAt(northStart, z),
+            northStart,
+            z,
+            x,
+            z
+          )
         )
         northStart = -1
       }
@@ -392,7 +425,8 @@ export function buildDungeonFloorGroup(
           lo + len / 2,
           ctx.wallHeight / 2 + SHADOW_CONTACT_LIFT,
           z + 1 + WALL_HALF_THICKNESS,
-          wallFadeGroup(
+          wallFadeGroups(
+            'south',
             roomIndexAt(southStart, z),
             southStart,
             z + 1,
@@ -438,7 +472,14 @@ export function buildDungeonFloorGroup(
           x + 1 + WALL_HALF_THICKNESS,
           ctx.wallHeight / 2 + SHADOW_CONTACT_LIFT,
           lo + len / 2,
-          -1,
+          wallFadeGroups(
+            'east',
+            roomIndexAt(x, eastStart),
+            x + 1,
+            eastStart,
+            x + 1,
+            z
+          ),
           -1
         )
         eastStart = -1
@@ -464,7 +505,7 @@ export function buildDungeonFloorGroup(
           x - WALL_HALF_THICKNESS,
           ctx.wallHeight / 2 + SHADOW_CONTACT_LIFT,
           lo + len / 2,
-          wallFadeGroup(roomIndexAt(x, westStart), x, westStart, x, z)
+          wallFadeGroups('west', roomIndexAt(x, westStart), x, westStart, x, z)
         )
         westStart = -1
       }
@@ -474,7 +515,10 @@ export function buildDungeonFloorGroup(
       }
     }
   }
-  for (const run of wallRuns) run.fadeGroup = resolveFadeGroup(run.fadeGroup)
+  for (const run of wallRuns)
+    for (const q of VIEW_QUADRANTS)
+      if (run.fadeGroups[q] >= 0)
+        run.fadeGroups[q] = resolveFadeGroup(q, run.fadeGroups[q])
   group.add(wallRunGroup)
 
   // Door arches are static; the layer animates the leaves.

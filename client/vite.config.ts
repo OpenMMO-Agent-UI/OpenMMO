@@ -521,6 +521,10 @@ export default defineConfig(({ mode }) => {
     // Worktrees symlink node_modules, so the default node_modules/.vite would
     // let another checkout's dev server rewrite this one's optimized deps.
     cacheDir: '.vite',
+    // openmmo-client symlinks its own sources into src/. Without this rollup
+    // resolves each one to its real path outside the project and their
+    // relative imports break.
+    resolve: { preserveSymlinks: true },
     define: { __APP_VERSION__: JSON.stringify(appVersion) },
     server: {
       host: true,
