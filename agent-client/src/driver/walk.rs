@@ -524,10 +524,11 @@ pub(super) async fn walk(
             None => true,
         };
         if route.is_empty() || leg >= route.len() || goal_moved {
-            let (found, waypoints, start_floor) = {
+            let (found, waypoints, start_floor, here) = {
                 let s = state.lock().await;
                 let r = s.find_path_to(goal.0, goal.1, target_floor);
-                (r.found, r.waypoints, s.passability_floor())
+                let here = s.self_player.as_ref().map(|p| p.position);
+                (r.found, r.waypoints, s.passability_floor(), here)
             };
             // A search that cannot reach the goal still hands back the leg
             // that gets closest. That leg is worth walking — it carries us to
@@ -543,7 +544,7 @@ pub(super) async fn walk(
                     .iter()
                     .position(|wp| wp.floor != start_floor)
                     .unwrap_or(waypoints.len());
-                waypoints[..keep].to_vec()
+                approach_only(&waypoints[..keep], here, goal)
             };
             leg = 0;
             last_goal = Some(goal);
@@ -614,6 +615,26 @@ pub(super) async fn walk(
         if tuning.give_up_when_unreachable {
             return Walked::Lost(LostReason::NoPath);
         }
+    }
+}
+
+/// A best-effort leg is only worth walking if it ends nearer the goal: what
+/// is left of a climb-out route once the floor change is cut is the walk back
+/// to the stair shaft, and then back out to the door really in our way.
+fn approach_only(
+    leg: &[PathWaypoint],
+    here: Option<Position>,
+    goal: (f32, f32),
+) -> Vec<PathWaypoint> {
+    let (Some(here), Some(end)) = (here, leg.last()) else {
+        return Vec::new();
+    };
+    let gain = PlanarDelta::to_xz(&here, goal.0, goal.1).dist
+        - PlanarDelta::xz(end.x, end.z, goal.0, goal.1).dist;
+    if gain > 0.0 {
+        leg.to_vec()
+    } else {
+        Vec::new()
     }
 }
 
@@ -1399,5 +1420,66 @@ mod tests {
                 "a walk already aimed at something must run to it"
             );
         }
+    }
+
+    /// Opening a door on the way down is not a round trip to the stairs. With
+    /// the floor still sealed beyond it, the best-effort leg A* hands back
+    /// runs to the shaft we came in by — walking its near half took the
+    /// character back to the landing and then out through the same door again.
+    #[tokio::test(start_paused = true)]
+    async fn a_door_opened_underground_is_walked_through_not_back_from() {
+        let (mut s, d, mut rx) = crate::state::tests::dungeon_state_at(-1450.0, 4720.0);
+        s.self_player_id = Some(PlayerId::from(1));
+        let landing = d.arrival_position(1).expect("the crypt has a first floor");
+        let cell = onlinerpg_shared::dungeon::world_to_cell(&d.entrance, landing.x, landing.z);
+        let start = crate::state::tests::stand_at(&mut s, &d, 1, cell);
+        crate::state::tests::synchronize_view(&mut s);
+        let goal = d.arrival_position(2).expect("the crypt has a second floor");
+        let floor = d.passability_floor(2);
+        let state = Arc::new(Mutex::new(s));
+
+        let to = WalkTo::Place {
+            x: goal.x,
+            z: goal.z,
+            floor,
+        };
+        let walking = walk(&state, &to, false, Some(false));
+        tokio::pin!(walking);
+        let mut doors = 0;
+        let mut left_the_landing = false;
+        let result = loop {
+            tokio::select! {
+                biased;
+                Some(command) = rx.recv() => match command {
+                    ClientMessage::PlayerMove { position, .. } => {
+                        let mut s = state.lock().await;
+                        s.world_view.position = Some(position);
+                        let from_landing = PlanarDelta::to_xz(&position, start.x, start.z).dist;
+                        if from_landing > 2.0 {
+                            left_the_landing = true;
+                        } else {
+                            assert!(
+                                !left_the_landing,
+                                "walked back to the stair landing at ({:.1}, {:.1})",
+                                position.x, position.z,
+                            );
+                        }
+                    }
+                    ClientMessage::ToggleDungeonDoor { entrance_id, depth, door_id } => {
+                        doors += 1;
+                        state.lock().await.push_event(ServerMessage::DungeonDoorToggled {
+                            entrance_id,
+                            depth,
+                            door_id,
+                            is_open: true,
+                        });
+                    }
+                    other => panic!("unexpected command: {other:?}"),
+                },
+                result = &mut walking => break result,
+            }
+        };
+        assert_eq!(result, Walked::Arrived);
+        assert!(doors > 0, "the descent is sealed behind shut doors");
     }
 }
