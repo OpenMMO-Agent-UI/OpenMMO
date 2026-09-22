@@ -33,10 +33,36 @@ pub(crate) fn synchronize_view(state: &mut SharedState) {
     state.world_view.floor_level = state.self_floor_level;
 }
 
+pub(crate) fn test_character() -> onlinerpg_shared::character::Character {
+    use onlinerpg_shared::character::{CharacterAttributes, CharacterClass};
+    onlinerpg_shared::character::Character {
+        id: 1,
+        name: "Tester".into(),
+        created_at: 0,
+        level: 1,
+        xp: 0,
+        max_hp: 10,
+        attributes: CharacterAttributes {
+            r#str: 10,
+            dex: 10,
+            con: 10,
+            int: 10,
+            wis: 10,
+            cha: 10,
+            guard: 0,
+        },
+        class: CharacterClass::Knight,
+        gender: Default::default(),
+        equipment: Default::default(),
+        titles: Vec::new(),
+        active_title: None,
+    }
+}
+
 pub(crate) fn test_state() -> (SharedState, mpsc::Receiver<ClientMessage>) {
     let (tx, rx) = mpsc::channel(8);
     let state = SharedState::new(
-        Vec::new(),
+        vec![test_character()],
         tx,
         Arc::new(HeightSampler::new(NoTiles)),
         Arc::new(crate::splat::SplatSampler::new(NoTiles)),
@@ -150,7 +176,7 @@ fn cluttered_dungeon_state() -> (
     dungeon_state_at(d.entrance.x, d.entrance.z)
 }
 
-fn dungeon_state_at(
+pub(crate) fn dungeon_state_at(
     x: f32,
     z: f32,
 ) -> (
@@ -164,7 +190,7 @@ fn dungeon_state_at(
     let dungeon = world.read().unwrap().dungeon_at(x, z).unwrap();
     let (tx, rx) = mpsc::channel(64);
     let mut state = SharedState::new(
-        Vec::new(),
+        vec![test_character()],
         tx,
         Arc::new(HeightSampler::new(NoTiles)),
         Arc::new(crate::splat::SplatSampler::new(NoTiles)),
@@ -199,7 +225,7 @@ fn coordinates_in(line: &str) -> Vec<(f32, f32)> {
 }
 
 /// Put the agent on `depth`, standing on `cell`.
-fn stand_at(
+pub(crate) fn stand_at(
     s: &mut SharedState,
     dungeon: &crate::dungeon::Dungeon,
     depth: u8,
