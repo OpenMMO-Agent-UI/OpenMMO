@@ -179,6 +179,7 @@ export type ClientMessage =
         appearance?: CharacterAppearance
       }
     }
+  | { RenameCharacter: { character_id: number; new_name: string } }
   | { DeleteCharacter: { character_id: number } }
   | { CancelCharacterDeletion: { character_id: number } }
   | { RenameCharacter: { character_id: number; new_name: string } }
