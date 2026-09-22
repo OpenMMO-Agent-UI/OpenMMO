@@ -221,11 +221,24 @@ fn resolve_npc_token(config_value: Option<String>) -> anyhow::Result<String> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    use tracing_subscriber::fmt::writer::{BoxMakeWriter, MakeWriterExt};
+    let log_file = std::env::var_os("AGENT_LOG_FILE").and_then(|path| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+    });
+    let writer = match log_file {
+        Some(file) => BoxMakeWriter::new(std::io::stdout.and(std::sync::Mutex::new(file))),
+        None => BoxMakeWriter::new(std::io::stdout),
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
+        .with_writer(writer)
         .init();
 
     let config_text = std::fs::read_to_string(CONFIG_PATH)
