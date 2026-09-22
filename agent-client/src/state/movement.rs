@@ -1,5 +1,22 @@
 use super::*;
 
+/// Mirrors the server's `NO_SPAWN_MARGIN`: no monster spawns this close to a
+/// town, so a bot standing inside it never sees one.
+pub(crate) const TOWN_MARGIN: f32 = 30.0;
+
+/// How long a monster no route reached stays off the worker's list; long
+/// enough to walk on, short enough that one which wanders out is fought.
+pub(crate) const MONSTER_GIVE_UP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long a spot the server could not reach stays out of our plans; a
+/// fence comes down or a door opens, and the way is worth trying again.
+pub(crate) const DEAD_END_FOR: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Known water cells kept before the set starts over. Water does not move,
+/// but a worker that ranges over the whole map would otherwise hold every
+/// shore it ever planned past.
+const WET_CELLS_CAP: usize = 20_000;
+
 /// A resolved `move` target.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MoveTarget {
@@ -485,6 +502,139 @@ impl SharedState {
             goal_floor,
             world.passability_cache(),
             max_nodes,
+        )
+    }
+
+    pub fn give_up_on_monster(&mut self, id: &str, now: std::time::Instant) {
+        self.monsters_given_up
+            .retain(|_, at| now.duration_since(*at) < MONSTER_GIVE_UP);
+        self.monsters_given_up.insert(id.to_string(), now);
+    }
+
+    pub fn gave_up_on_monster(&self, id: &str, now: std::time::Instant) -> bool {
+        self.monsters_given_up
+            .get(id)
+            .is_some_and(|at| now.duration_since(*at) < MONSTER_GIVE_UP)
+    }
+
+    /// Add water cells a planned route crossed. Whether any were new.
+    pub fn learn_wet_cells(&mut self, cells: Vec<(i32, i32)>) -> bool {
+        if self.wet_cells.len() + cells.len() > WET_CELLS_CAP {
+            self.wet_cells.clear();
+        }
+        let known = self.wet_cells.len();
+        self.wet_cells.extend(cells);
+        self.wet_cells.len() != known
+    }
+
+    pub fn wet_cells(&self) -> impl Iterator<Item = &(i32, i32)> {
+        self.wet_cells.iter()
+    }
+
+    pub fn mark_unreachable(
+        &mut self,
+        cells: impl IntoIterator<Item = (i32, i32)>,
+        now: std::time::Instant,
+    ) {
+        self.unreachable_cells
+            .retain(|_, at| now.duration_since(*at) < DEAD_END_FOR);
+        self.unreachable_cells
+            .extend(cells.into_iter().map(|cell| (cell, now)));
+    }
+
+    fn unreachable_now(&self) -> impl Iterator<Item = &(i32, i32)> {
+        let now = std::time::Instant::now();
+        self.unreachable_cells
+            .iter()
+            .filter(move |(_, at)| now.duration_since(**at) < DEAD_END_FOR)
+            .map(|(cell, _)| cell)
+    }
+
+    /// Record a step of the walk in progress, keeping the latest few.
+    pub fn push_walk_trace(&mut self, line: String) {
+        const KEEP: usize = 24;
+        if self.walk_trace.len() == KEEP {
+            self.walk_trace.remove(0);
+        }
+        self.walk_trace.push(line);
+    }
+
+    /// A route for a walk longer than one server leg. The server searches
+    /// each leg with [`pathfinding::DEFAULT_MAX_NODES`], too few to route far
+    /// round a walled-in block, so a leg cut from a route under that budget
+    /// can point into a dead end. Stays out of known water and of spots a
+    /// server leg already failed to reach.
+    pub fn find_long_path_to(&self, goal_x: f32, goal_z: f32, goal_floor: u8) -> PathResult {
+        const MAX_NODES: usize = 60_000;
+        const MARGIN: i32 = 64;
+        let Some(me) = self.self_player.as_ref().map(|p| p.position) else {
+            return self.find_path_to(goal_x, goal_z, goal_floor);
+        };
+        let (lo_x, hi_x) = (
+            me.x.min(goal_x) as i32 - MARGIN,
+            me.x.max(goal_x) as i32 + MARGIN,
+        );
+        let (lo_z, hi_z) = (
+            me.z.min(goal_z) as i32 - MARGIN,
+            me.z.max(goal_z) as i32 + MARGIN,
+        );
+        let avoid: Vec<(i32, i32)> = self
+            .wet_cells
+            .iter()
+            .chain(self.unreachable_now())
+            .copied()
+            .filter(|&(x, z)| (lo_x..=hi_x).contains(&x) && (lo_z..=hi_z).contains(&z))
+            .collect();
+        let start_floor = self.passability_floor();
+        let world = self.world_cache.read().unwrap();
+        pathfinding::find_and_smooth_path_avoiding(
+            me.x,
+            me.z,
+            start_floor,
+            goal_x,
+            goal_z,
+            goal_floor,
+            world.passability_cache(),
+            MAX_NODES,
+            &avoid,
+        )
+    }
+
+    /// [`Self::find_path_to`] that stays out of known water cells.
+    pub fn find_dry_path_to(&self, goal_x: f32, goal_z: f32, goal_floor: u8) -> PathResult {
+        let Some(me) = self.self_player.as_ref().map(|p| p.position) else {
+            return self.find_path_to(goal_x, goal_z, goal_floor);
+        };
+        const MARGIN: i32 = 64;
+        let (lo_x, hi_x) = (
+            me.x.min(goal_x) as i32 - MARGIN,
+            me.x.max(goal_x) as i32 + MARGIN,
+        );
+        let (lo_z, hi_z) = (
+            me.z.min(goal_z) as i32 - MARGIN,
+            me.z.max(goal_z) as i32 + MARGIN,
+        );
+        let wet: Vec<(i32, i32)> = self
+            .wet_cells
+            .iter()
+            .copied()
+            .filter(|&(x, z)| (lo_x..=hi_x).contains(&x) && (lo_z..=hi_z).contains(&z))
+            .collect();
+        if wet.is_empty() {
+            return self.find_path_to(goal_x, goal_z, goal_floor);
+        }
+        let start_floor = self.passability_floor();
+        let world = self.world_cache.read().unwrap();
+        pathfinding::find_and_smooth_path_avoiding(
+            me.x,
+            me.z,
+            start_floor,
+            goal_x,
+            goal_z,
+            goal_floor,
+            world.passability_cache(),
+            path_max_nodes(start_floor, goal_floor),
+            &wet,
         )
     }
 
