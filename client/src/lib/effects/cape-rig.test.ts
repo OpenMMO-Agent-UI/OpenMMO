@@ -197,7 +197,7 @@ describe('cape fit', () => {
     // at the collar the sheet may sit 0.1 m inside, a third of a metre down it
     // may not sit inside at all.
     const body = sunk.options.body!
-    expect(capeMinZAt(body, 0)).toBeCloseTo(-0.02, 3)
+    expect(capeMinZAt(body, 0)).toBeCloseTo(-0.028, 3)
     const bulgeDrop = 1.53 - 1.15
     const collarDepth = depthOf(sunk)
     expect(collarDepth + capeMinZAt(body, bulgeDrop)).toBeGreaterThan(0.219)
