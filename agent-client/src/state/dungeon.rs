@@ -14,8 +14,7 @@ impl SharedState {
     /// locally, so without this we would path around one another player left
     /// open — and, worse, believe a route is sealed when it is not.
     pub fn request_dungeon_doors_here(&mut self) {
-        self.world_view.synchronized = false;
-        self.pending_commands.push(ClientMessage::ResyncWorld);
+        self.request_resync();
     }
 
     /// Dungeon whose footprint covers our position, if any.
