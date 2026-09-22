@@ -10,6 +10,7 @@ import {
   lerp,
   regionKey,
 } from '../terrain/terrain-constants'
+import { viewRay } from '../utils/view-direction'
 
 interface RegisteredBridge {
   px: number
@@ -253,7 +254,7 @@ class BridgeManager {
 
   /**
    * Returns the placement id of a bridge that visually occludes the player
-   * along the isometric camera ray R(s) = (px - s, py + s, pz + s), s >= 0.
+   * along the view ray (`viewRay`), s >= 0.
    * The AABB has no lower Y bound (sLow=0) so a player directly under the
    * deck still counts as occluded — otherwise the ray would exit the XZ box
    * before climbing to the bridge bottom.
@@ -284,11 +285,11 @@ class BridgeManager {
         )
           continue
       }
-      // Intersect the iso camera ray with the rotated deck rect in local
-      // space. AABB-only checks false-positive at non-axis rotations because
-      // the rotated rect's AABB is much larger than the rect itself.
-      const lvx = -b.cosRot - b.sinRot
-      const lvz = -b.sinRot + b.cosRot
+      // Intersect the view ray with the rotated deck rect in local space.
+      // AABB-only checks false-positive at non-axis rotations because the
+      // rotated rect's AABB is much larger than the rect itself.
+      const lvx = viewRay.x * b.cosRot - viewRay.z * b.sinRot
+      const lvz = viewRay.x * b.sinRot + viewRay.z * b.cosRot
       let sMin = 0
       let sMax = sHigh
       // Local X slab
