@@ -259,10 +259,7 @@ fn estate_chest_views_share_updates_and_reject_stale_resurrection() {
     );
     assert!(!occupied(&a, 20.5, 10.5, 0));
     assert!(!a.world_view.synchronized);
-    assert!(a
-        .pending_commands
-        .iter()
-        .any(|cmd| matches!(cmd, ClientMessage::ResyncWorld)));
+    assert!(a.take_resync_due());
 }
 
 #[test]
