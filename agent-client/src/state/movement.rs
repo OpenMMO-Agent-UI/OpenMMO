@@ -1,5 +1,9 @@
 use super::*;
 
+/// Mirrors the server's `NO_SPAWN_MARGIN`: no monster spawns this close to a
+/// town, so a bot standing inside it never sees one.
+pub(crate) const TOWN_MARGIN: f32 = 30.0;
+
 /// A resolved `move` target.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MoveTarget {
@@ -485,6 +489,44 @@ impl SharedState {
             goal_floor,
             world.passability_cache(),
             max_nodes,
+        )
+    }
+
+    /// [`Self::find_path_to`] that stays out of known water cells.
+    pub fn find_dry_path_to(&self, goal_x: f32, goal_z: f32, goal_floor: u8) -> PathResult {
+        let Some(me) = self.self_player.as_ref().map(|p| p.position) else {
+            return self.find_path_to(goal_x, goal_z, goal_floor);
+        };
+        const MARGIN: i32 = 64;
+        let (lo_x, hi_x) = (
+            me.x.min(goal_x) as i32 - MARGIN,
+            me.x.max(goal_x) as i32 + MARGIN,
+        );
+        let (lo_z, hi_z) = (
+            me.z.min(goal_z) as i32 - MARGIN,
+            me.z.max(goal_z) as i32 + MARGIN,
+        );
+        let wet: Vec<(i32, i32)> = self
+            .wet_cells
+            .iter()
+            .copied()
+            .filter(|&(x, z)| (lo_x..=hi_x).contains(&x) && (lo_z..=hi_z).contains(&z))
+            .collect();
+        if wet.is_empty() {
+            return self.find_path_to(goal_x, goal_z, goal_floor);
+        }
+        let start_floor = self.passability_floor();
+        let world = self.world_cache.read().unwrap();
+        pathfinding::find_and_smooth_path_avoiding(
+            me.x,
+            me.z,
+            start_floor,
+            goal_x,
+            goal_z,
+            goal_floor,
+            world.passability_cache(),
+            path_max_nodes(start_floor, goal_floor),
+            &wet,
         )
     }
 

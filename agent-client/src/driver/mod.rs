@@ -29,11 +29,13 @@ mod movement;
 mod outcome;
 mod prompt;
 mod unload_catch;
-mod walk;
+pub(crate) mod walk;
+mod worker;
 
 pub(crate) use unload_catch::BUYER as CATCH_BUYER;
 
 pub(crate) use prompt::{format_event, player_within_event_range};
+pub use worker::{worker_driver, WorkerConfig, WorkerKind};
 
 use std::collections::HashSet;
 use std::sync::Arc;
