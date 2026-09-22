@@ -314,7 +314,7 @@ export function collectWallSegments(
 ) {
   const dirInfo = WALL_DIR_INFO[dir]
   const { doors } = entries
-  const outerTarget = dirInfo.isFront ? entries.front : entries.back
+  const outerTarget = entries.walls[dir]
   const line = wallLineCoord(room, dir)
   const wh = room.wallHeight
   const yBase = floorYBase(room.floorLevel, wh) + FLOOR_THICKNESS / 2
