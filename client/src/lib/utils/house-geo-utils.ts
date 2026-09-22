@@ -5,6 +5,7 @@ import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import type { RoomData } from '../types/housing'
 import { getHousingMaterial, HOUSING_TEXTURES } from './housing-textures'
+import { viewRay } from './view-direction'
 
 export const WALL_THICKNESS = 0.1
 export const FLOOR_THICKNESS = 0.1
@@ -83,12 +84,14 @@ export interface DoorMeshInfo {
 
 export interface HouseGroupResult {
   houseGroup: THREE.Group
-  /** Per-floor groups: key = floorLevel, value = { front, back, floor, stair } */
+  /** Per-floor groups, keyed by floorLevel. */
   floorGroups: Map<
     number,
     {
-      front: THREE.Group
-      back: THREE.Group
+      /** Outer wall faces and gable ends, by the way they face. */
+      walls: Record<WallDirection, THREE.Group>
+      /** Roof planes and their trim, hidden whenever the player is inside. */
+      roof: THREE.Group
       floor: THREE.Group
       stair: THREE.Group
       /** One group per shared wall line, ghosted when it hides the player */
@@ -145,8 +148,8 @@ export interface InteriorWallGroup {
 }
 
 export type FloorEntries = {
-  front: GeoEntry[]
-  back: GeoEntry[]
+  walls: Record<WallDirection, GeoEntry[]>
+  roof: GeoEntry[]
   floor: GeoEntry[]
   stair: GeoEntry[]
   doors: DoorMeshInfo[]
@@ -173,18 +176,19 @@ export function interiorWall(
   return bucket
 }
 
-/** True when `wall` stands between the isometric SW camera and a player at
- *  room-local (px, pz): the view ray toward the camera climbs 1m per 1m of
- *  north→south (or east→west) travel, so the wall hides the player only
- *  within `height` metres, and only where a span covers the crossing. */
+/** True when `wall` stands between the camera and a player at room-local
+ *  (px, pz): the view ray crosses the wall line below `height`, and a span
+ *  covers the crossing. */
 export function interiorWallOccludes(
   wall: InteriorWall,
   px: number,
   pz: number
 ): boolean {
-  const d = wall.isNS ? wall.line - pz : px - wall.line
+  const run = wall.isNS ? viewRay.z : viewRay.x
+  if (Math.abs(run) < 1e-6) return false
+  const d = (wall.isNS ? wall.line - pz : wall.line - px) / run
   if (d <= 0 || d >= wall.height) return false
-  const a = wall.isNS ? px - d : pz + d
+  const a = wall.isNS ? px + viewRay.x * d : pz + viewRay.z * d
   const margin = 0.6
   return wall.spans.some(([s0, s1]) => a >= s0 - margin && a <= s1 + margin)
 }
@@ -302,8 +306,8 @@ export function getOrCreateFloorEntries(
   let entries = perFloor.get(fl)
   if (!entries) {
     entries = {
-      front: [],
-      back: [],
+      walls: { north: [], south: [], east: [], west: [] },
+      roof: [],
       floor: [],
       stair: [],
       doors: [],
