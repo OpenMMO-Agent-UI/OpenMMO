@@ -17,6 +17,9 @@ import {
   type PlayerState,
 } from '../utils/movementUtils'
 import { entityGroundY } from './entity-ground'
+import { dungeonManager } from './dungeonManager'
+import { currentDungeonDepth } from '../stores/dungeonStore'
+import { observedPlayerId } from '../stores/observerStore'
 import { FishingAnimationName, SitAnimationName } from '../types/animations'
 import { shortestWrappedDeltaX } from '../terrain/world-wrap'
 import type { TerrainHeightManager } from './terrainHeightManager'
@@ -159,8 +162,20 @@ class PlayerStateManager {
       }
     })
 
-    // Snapshot other-player store state once for the frame (torch lookup below).
-    const otherPlayers = get(gameStore).otherPlayers
+    // Snapshot the player stores once for the frame (mount/torch lookups
+    // below).
+    const store = get(gameStore)
+    const otherPlayers = store.otherPlayers
+    /// Who a drawn body's state lives on. The watched character in observer
+    /// mode is never in `otherPlayers` — it is `currentPlayer` (the same
+    /// singleton trap the floorLevel lookup below documents) — so reading its
+    /// mount there always missed, and a rider was interpolated at footpace
+    /// while the server carried it off at `HORSE_MOVE_MULT`. The mirror fell
+    /// behind until the desync guard snapped it forward, over and over.
+    const drawnState = (playerId: number) =>
+      playerId === observedPlayerId()
+        ? (store.currentPlayer ?? undefined)
+        : otherPlayers.get(playerId)
 
     // Update players
     this.targetPositions.forEach((targetPos, playerId) => {
@@ -198,7 +213,7 @@ class PlayerStateManager {
 
       // Calculate movement step
       const sprinting = this.targetSprinting.get(playerId) ?? false
-      const mount = otherPlayers.get(playerId)?.mount ?? null
+      const mount = drawnState(playerId)?.mount ?? null
       const mounted = mount !== null
       const movementConfig = movementConfigFor(mount, sprinting)
       const result = calculateMovementStep(
@@ -216,13 +231,23 @@ class PlayerStateManager {
         ).rotation
       }
 
+      // The watched character in observer mode is deliberately never in
+      // otherPlayers (it lives in currentPlayer instead — see
+      // messageHandlers.ts's GameState snapshot), so that lookup always
+      // misses for it and silently floors to floorLevel 0. dungeonManager's
+      // own live depth is the only place that id's real floor still is,
+      // mirroring how sampleHeightAt sources it for the local player.
+      const floorLevel =
+        playerId === observedPlayerId() && dungeonManager.active
+          ? -get(currentDungeonDepth)
+          : (otherPlayers.get(playerId)?.floorLevel ?? 0)
+
       // calculateMovementStep only advances XZ and carries Y over, and the
       // move protocol has no per-waypoint Y, so the ground has to be
       // resampled here. Without it a remote keeps the Y it entered the floor
       // with, which reads as sinking through dungeon and house stairs.
-      const floor = otherPlayers.get(playerId)?.floorLevel ?? 0
       result.newPos.y =
-        (floor === 0
+        (floorLevel === 0
           ? this.floatSurfaceY(
               mount,
               result.newPos.x,
@@ -232,7 +257,7 @@ class PlayerStateManager {
           : null) ??
         entityGroundY(
           this.heightManager,
-          floor,
+          floorLevel,
           result.newPos.x,
           result.newPos.z,
           currentPos.y
@@ -275,7 +300,7 @@ class PlayerStateManager {
           this.executeAttack(playerId)
         }
       } else {
-        const hasTorch = otherPlayers.get(playerId)?.torchOn ?? false
+        const hasTorch = drawnState(playerId)?.torchOn ?? false
         const movementMode = getMovementMode(
           movement.totalDistance,
           hasTorch,
@@ -366,6 +391,35 @@ class PlayerStateManager {
       position: { ...position },
       state: 'idle',
       speed: 0,
+      rotation,
+    })
+  }
+
+  /// The spectator mirror fell too far behind to interpolate back, so catch
+  /// the drawn body up to where the server says it is. Not a teleport: nothing
+  /// happened to the character, the watcher just lost the race. Snapping
+  /// through `teleportPlayer` reset the state to idle and forgot the sprint
+  /// flag, so the idle clip played over a body still crossing the ground, and
+  /// the next leg was interpolated at footpace while the server carried it off
+  /// at sprint or horse speed — which put it behind again, and snapped again.
+  catchUpPlayer(
+    playerId: number,
+    position: Position,
+    rotation: number,
+    sprinting: boolean
+  ) {
+    const player = this.players.get(playerId)
+    if (!player) {
+      this.teleportPlayer(playerId, position, rotation)
+      return
+    }
+    this.targetPositions.set(playerId, { ...position })
+    this.targetRotations.set(playerId, rotation)
+    this.targetSprinting.set(playerId, sprinting)
+    this.movementData.delete(playerId)
+    this.players.set(playerId, {
+      ...player,
+      position: { ...position },
       rotation,
     })
   }
@@ -474,21 +528,43 @@ class PlayerStateManager {
     }
   }
 
+  /// `sprinting` left out means "however this body was already travelling" —
+  /// the observer's route handover (GameScene) continues a leg the server is
+  /// still running, and defaulting that to a walk dropped a sprinting mirror
+  /// to footpace halfway round an obstacle.
   setTargetPosition(
     playerId: number,
     targetPosition: Position,
     rotation: number,
-    sprinting = false
+    sprinting = this.targetSprinting.get(playerId) ?? false
   ) {
     const player = this.players.get(playerId)
 
-    // During attack animation, buffer the move for after the animation ends.
-    if (player?.state === 'attack') {
+    // During attack animation, buffer the move for after the animation ends —
+    // but never the facing. A swing is preceded by a face-only move carrying
+    // the rotation toward the target (agent-client's tick_combat does this,
+    // and so does the web client), and holding that back until the clip ended
+    // left every swing pointing wherever the body happened to be looking when
+    // the first one started. The movement loop skips attackers, so this is the
+    // only place their facing can still be set.
+    // The watched character's agent walks off the moment its target drops;
+    // holding that move for the rest of the clip is how the mirror fell behind.
+    if (
+      player?.state === 'attack' &&
+      playerId === observedPlayerId() &&
+      movedFar(player.position, targetPosition)
+    ) {
+      this.attackStartTimes.delete(playerId)
+      this.pendingMove.delete(playerId)
+      this.players.set(playerId, { ...player, state: 'idle' })
+    } else if (player?.state === 'attack') {
       this.pendingMove.set(playerId, {
         position: { ...targetPosition },
         rotation,
         sprinting,
       })
+      this.targetRotations.set(playerId, rotation)
+      this.players.set(playerId, { ...player, rotation })
       return
     }
 
@@ -514,10 +590,15 @@ class PlayerStateManager {
     const player = this.players.get(playerId)
     if (!player) return
 
-    // Set state to attack and record start time for update() to check
+    // Swing facing where the server last said, not where the interpolator had
+    // got to. The face-only move that precedes an attack arrives in the same
+    // batch as the attack itself, so its rotation may not have reached the
+    // drawn body through update() yet — and once the swing starts, update()
+    // skips this player entirely.
     this.players.set(playerId, {
       ...player,
       state: 'attack',
+      rotation: this.targetRotations.get(playerId) ?? player.rotation,
       attackCounter: (player.attackCounter ?? 0) + 1,
     })
     this.attackStartTimes.set(playerId, performance.now())
