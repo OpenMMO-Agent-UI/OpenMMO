@@ -81,11 +81,11 @@ describe('dungeon wall fade groups', () => {
 
     expect(isoCameraOccludesPlayer(south.localAABB, 6, 1, 9.5, 0.05)).toBe(true)
     expect(isoCameraOccludesPlayer(west.localAABB, 6, 1, 9.5, 0.05)).toBe(false)
-    expect(south.fadeGroup).toBeGreaterThanOrEqual(0)
-    expect(west.fadeGroup).toBe(south.fadeGroup)
-    expect(wallAt(runs, 13, 6.05).fadeGroup).not.toBe(south.fadeGroup)
-    expect(wallAt(runs, 3, 1.95).fadeGroup).toBe(-1)
-    expect(wallAt(runs, 4.05, 5).fadeGroup).toBe(-1)
+    expect(south.fadeGroups.sw).toBeGreaterThanOrEqual(0)
+    expect(west.fadeGroups.sw).toBe(south.fadeGroups.sw)
+    expect(wallAt(runs, 13, 6.05).fadeGroups.sw).not.toBe(south.fadeGroups.sw)
+    expect(wallAt(runs, 3, 1.95).fadeGroups.sw).toBe(-1)
+    expect(wallAt(runs, 4.05, 5).fadeGroups.sw).toBe(-1)
   })
 
   it('joins both south runs connected by the west wall of an inner bend', () => {
@@ -97,9 +97,27 @@ describe('dungeon wall fade groups', () => {
     const innerWest = wallAt(runs, 7.95, 7)
     const outerSouth = wallAt(runs, 9, 10.05)
 
-    expect(innerSouth.fadeGroup).toBeGreaterThanOrEqual(0)
-    expect(innerWest.fadeGroup).toBe(innerSouth.fadeGroup)
-    expect(outerSouth.fadeGroup).toBe(innerSouth.fadeGroup)
+    expect(innerSouth.fadeGroups.sw).toBeGreaterThanOrEqual(0)
+    expect(innerWest.fadeGroups.sw).toBe(innerSouth.fadeGroups.sw)
+    expect(outerSouth.fadeGroups.sw).toBe(innerSouth.fadeGroups.sw)
+  })
+
+  it('groups the north and east walls when the camera looks from the north-east', () => {
+    const runs = buildWalls([
+      { x: 2, z: 2, w: 2, d: 8 },
+      { x: 2, z: 2, w: 8, d: 2 },
+    ])
+    const north = wallAt(runs, 6, 1.95)
+    const eastEnd = wallAt(runs, 10.05, 3)
+    const innerEast = wallAt(runs, 4.05, 7)
+    const south = wallAt(runs, 6, 4.05)
+
+    expect(north.fadeGroups.ne).toBeGreaterThanOrEqual(0)
+    expect(eastEnd.fadeGroups.ne).toBe(north.fadeGroups.ne)
+    expect(innerEast.fadeGroups.ne).not.toBe(north.fadeGroups.ne)
+    expect(north.fadeGroups.sw).toBe(-1)
+    expect(south.fadeGroups.ne).toBe(-1)
+    expect(south.fadeGroups.sw).toBeGreaterThanOrEqual(0)
   })
 
   it('preserves room groups across doorway gaps and separates corridor walls', () => {
@@ -110,10 +128,12 @@ describe('dungeon wall fade groups', () => {
     const roomSouth = wallAt(runs, 3, 6.05)
     const corridorSouth = wallAt(runs, 5, 10.05)
 
-    expect(roomSouth.fadeGroup).toBe(0)
-    expect(wallAt(runs, 7, 6.05).fadeGroup).toBe(roomSouth.fadeGroup)
-    expect(wallAt(runs, 1.95, 4).fadeGroup).toBe(roomSouth.fadeGroup)
-    expect(corridorSouth.fadeGroup).not.toBe(roomSouth.fadeGroup)
-    expect(wallAt(runs, 3.95, 8).fadeGroup).toBe(corridorSouth.fadeGroup)
+    expect(roomSouth.fadeGroups.sw).toBe(0)
+    expect(wallAt(runs, 7, 6.05).fadeGroups.sw).toBe(roomSouth.fadeGroups.sw)
+    expect(wallAt(runs, 1.95, 4).fadeGroups.sw).toBe(roomSouth.fadeGroups.sw)
+    expect(corridorSouth.fadeGroups.sw).not.toBe(roomSouth.fadeGroups.sw)
+    expect(wallAt(runs, 3.95, 8).fadeGroups.sw).toBe(
+      corridorSouth.fadeGroups.sw
+    )
   })
 })
