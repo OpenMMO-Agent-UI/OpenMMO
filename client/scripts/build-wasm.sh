@@ -3,9 +3,9 @@
 # it takes minutes and dev builds do not need the smaller binary.
 set -euo pipefail
 
-opt=(--no-opt)
+wasm_opt_flag=--no-opt
 if [ "${1:-}" = "--release" ]; then
-    opt=()
+    wasm_opt_flag=
 fi
 
 client_dir=$(cd "$(dirname "$0")/.." && pwd)
@@ -42,4 +42,4 @@ npm run generate:monster-clips
 npm run generate:animations
 rm -rf src/lib/wasm
 cd ../shared
-wasm-pack build --target web "${opt[@]}" --out-dir ../client/src/lib/wasm
+wasm-pack build --target web $wasm_opt_flag --out-dir ../client/src/lib/wasm

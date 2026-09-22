@@ -1,14 +1,11 @@
 import type * as THREE from 'three'
+import { viewRayRun } from './view-direction'
 
 /**
- * Isometric SW-camera ray–AABB occlusion test.
- *
- * The scene camera looks down ~35° with XZ forward (1,0,−1)/√2. A ray from the
- * player toward the camera, R(s) = (px−s, py+s, pz+s) for s ≥ 0, passes through
- * `box` iff the run [sMin, sMax] inside it exceeds `minDepth` — i.e. the box
- * occludes the player by at least that much. `margin` widens the box in XZ.
- * Shared by the housing/tree/dungeon occluders so the camera model lives in
- * exactly one place.
+ * Whether `box` stands between the player and the camera: the view ray from
+ * the player runs through it for more than `minDepth`. `margin` widens the
+ * box in XZ. Shared by the housing/tree/dungeon occluders so the camera
+ * model lives in one place.
  */
 export function isoCameraOccludesPlayer(
   box: THREE.Box3,
@@ -18,12 +15,19 @@ export function isoCameraOccludesPlayer(
   minDepth: number,
   margin = 0
 ): boolean {
-  const sHigh = box.max.y - py
-  if (sHigh <= 0) return false
-  const sLow = Math.max(box.min.y - py, 0)
-  const sMin = Math.max(px - box.max.x - margin, box.min.z - margin - pz, sLow)
-  const sMax = Math.min(px - box.min.x + margin, box.max.z + margin - pz, sHigh)
-  return sMax - sMin > minDepth
+  return (
+    viewRayRun(
+      box.min.x - margin,
+      box.min.y,
+      box.min.z - margin,
+      box.max.x + margin,
+      box.max.y,
+      box.max.z + margin,
+      px,
+      py,
+      pz
+    ) > minDepth
+  )
 }
 
 /**
