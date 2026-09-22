@@ -32,6 +32,7 @@
   import { isChatAtBottom } from '../chat-scroll'
   import { mountOverlay } from '../stores/overlayStack'
   import { chatFocusRequest, chatDraftRequest } from '../stores/npcMenuStore'
+  import { isObserver } from '../stores/observerStore'
   import {
     translationEnabled,
     translationTargetLanguage,
@@ -244,7 +245,9 @@
     void interacting
     transcriptVisible = true
     window.clearTimeout(fadeTimer)
-    if (!interacting) {
+    // A spectator has no chat input to focus, so hover is the only thing
+    // that could keep `interacting` true — never fade instead of relying on it.
+    if (!interacting && !isObserver) {
       fadeTimer = window.setTimeout(() => {
         transcriptVisible = false
       }, TRANSCRIPT_FADE_DELAY_MS)
@@ -341,6 +344,7 @@
 
   function handleGlobalKeydown(event: KeyboardEvent) {
     if ($instrumentPanelVisible) return
+    if (isObserver) return
     if (event.isComposing || event.keyCode === 229) return
     if (isTypingTarget(event.target)) return
     if (
@@ -561,90 +565,94 @@
     </div>
   </div>
 
-  <div class="chat-input" class:disconnected={!isConnected}>
-    <div class="channel-wrap">
-      {#if channelMenuOpen}
-        <div class="channel-menu" role="menu">
-          <button
-            class="channel-item"
-            role="menuitemradio"
-            aria-checked={$chatChannel === 'say'}
-            onclick={() => selectChannel('say')}
-          >
-            {$t('chat.say')}
-            {#if $chatChannel === 'say'}<span class="check">✓</span>{/if}
-          </button>
-          <button
-            class="channel-item"
-            role="menuitemradio"
-            aria-checked={$chatChannel === 'party'}
-            disabled={!inParty}
-            title={inParty ? undefined : $t('chat.joinParty')}
-            onclick={() => selectChannel('party')}
-          >
-            {$t('chat.party')}
-            {#if $chatChannel === 'party'}<span class="check">✓</span>{/if}
-          </button>
-          <button
-            class="channel-item"
-            role="menuitemradio"
-            aria-checked={$chatChannel === 'family'}
-            disabled={!inFamily}
-            title={inFamily ? undefined : $t('chat.joinFamily')}
-            onclick={() => selectChannel('family')}
-          >
-            {$t('chat.family')}
-            {#if $chatChannel === 'family'}<span class="check">✓</span>{/if}
-          </button>
-        </div>
-      {/if}
+  <!-- A spectator cannot talk: every send path is a no-op, and the mirror
+       relays the transcript read-only. -->
+  {#if !isObserver}
+    <div class="chat-input" class:disconnected={!isConnected}>
+      <div class="channel-wrap">
+        {#if channelMenuOpen}
+          <div class="channel-menu" role="menu">
+            <button
+              class="channel-item"
+              role="menuitemradio"
+              aria-checked={$chatChannel === 'say'}
+              onclick={() => selectChannel('say')}
+            >
+              {$t('chat.say')}
+              {#if $chatChannel === 'say'}<span class="check">✓</span>{/if}
+            </button>
+            <button
+              class="channel-item"
+              role="menuitemradio"
+              aria-checked={$chatChannel === 'party'}
+              disabled={!inParty}
+              title={inParty ? undefined : $t('chat.joinParty')}
+              onclick={() => selectChannel('party')}
+            >
+              {$t('chat.party')}
+              {#if $chatChannel === 'party'}<span class="check">✓</span>{/if}
+            </button>
+            <button
+              class="channel-item"
+              role="menuitemradio"
+              aria-checked={$chatChannel === 'family'}
+              disabled={!inFamily}
+              title={inFamily ? undefined : $t('chat.joinFamily')}
+              onclick={() => selectChannel('family')}
+            >
+              {$t('chat.family')}
+              {#if $chatChannel === 'family'}<span class="check">✓</span>{/if}
+            </button>
+          </div>
+        {/if}
+        <button
+          class="channel-btn"
+          aria-haspopup="menu"
+          aria-expanded={channelMenuOpen}
+          title={$t('chat.chooseChannel')}
+          onclick={(e) => {
+            e.stopPropagation()
+            channelMenuOpen = !channelMenuOpen
+          }}
+        >
+          {$t(CHANNEL_LABELS[$chatChannel])}
+          <span class="caret" aria-hidden="true">▴</span>
+        </button>
+      </div>
+      <div class="input-wrap">
+        {#if commandGhost}
+          <div class="input-ghost" aria-hidden="true">
+            <span class="ghost-typed">{messageInput}</span><span
+              class="ghost-suffix">{commandGhost}</span
+            >
+          </div>
+        {/if}
+        <input
+          type="text"
+          bind:this={chatInput}
+          bind:value={messageInput}
+          onkeydown={handleKeyDown}
+          onfocus={() => {
+            inputFocused = true
+            leaveCombatTab()
+          }}
+          onblur={() => {
+            inputFocused = false
+            restoreViewportAfterKeyboard()
+          }}
+          placeholder={$t(CHANNEL_PLACEHOLDERS[$chatChannel])}
+          disabled={!isConnected}
+        />
+      </div>
       <button
-        class="channel-btn"
-        aria-haspopup="menu"
-        aria-expanded={channelMenuOpen}
-        title={$t('chat.chooseChannel')}
-        onclick={(e) => {
-          e.stopPropagation()
-          channelMenuOpen = !channelMenuOpen
-        }}
+        class="send-btn"
+        onclick={sendMessage}
+        disabled={!isConnected || !messageInput.trim()}
       >
-        {$t(CHANNEL_LABELS[$chatChannel])}
-        <span class="caret" aria-hidden="true">▴</span>
+        {$t('chat.send')}
       </button>
     </div>
-    <div class="input-wrap">
-      {#if commandGhost}
-        <div class="input-ghost" aria-hidden="true">
-          <span class="ghost-typed">{messageInput}</span><span
-            class="ghost-suffix">{commandGhost}</span
-          >
-        </div>
-      {/if}
-      <input
-        type="text"
-        bind:this={chatInput}
-        bind:value={messageInput}
-        onkeydown={handleKeyDown}
-        onfocus={() => {
-          inputFocused = true
-          leaveCombatTab()
-        }}
-        onblur={() => {
-          inputFocused = false
-          restoreViewportAfterKeyboard()
-        }}
-        placeholder={$t(CHANNEL_PLACEHOLDERS[$chatChannel])}
-        disabled={!isConnected}
-      />
-    </div>
-    <button
-      class="send-btn"
-      onclick={sendMessage}
-      disabled={!isConnected || !messageInput.trim()}
-    >
-      {$t('chat.send')}
-    </button>
-  </div>
+  {/if}
 </div>
 
 <style>
