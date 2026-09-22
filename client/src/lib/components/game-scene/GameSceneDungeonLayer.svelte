@@ -41,6 +41,7 @@
     isoCameraOccludesNearPlayer,
     isoCameraOccludesPlayer,
   } from '../../utils/iso-occlusion'
+  import { viewQuadrant, type ViewQuadrant } from '../../utils/view-direction'
   import { passabilityDebugVisible } from '../../stores/debugStore'
   import { pushPassabilityEdges } from '../../utils/passability-wireframe'
   import { generateDungeonPuddles } from '../../utils/dungeon-puddles'
@@ -272,7 +273,7 @@
     base: THREE.Material | THREE.Material[]
     ghost: THREE.Material
     aabb: THREE.Box3
-    fadeGroup: number
+    fadeGroups: Record<ViewQuadrant, number>
     occluded?: boolean
     /** Ghosted this frame, alone or with its group. */
     faded?: boolean
@@ -1021,7 +1022,7 @@
         base: r.mesh.material,
         ghost: getGhostHousingMaterial(idx),
         aabb: r.localAABB.clone().translate(group.position),
-        fadeGroup: r.fadeGroup,
+        fadeGroups: r.fadeGroups,
       })
     }
   }
@@ -1346,6 +1347,7 @@
 
     // Fade occluding walls together with their room or corridor corner group.
     fadedWallGroups.clear()
+    const quadrant = viewQuadrant()
     for (const w of wallRuns) {
       w.occluded = isoCameraOccludesNearPlayer(
         w.aabb,
@@ -1355,10 +1357,12 @@
         WALL_RUN_MIN_OCCLUSION,
         WALL_RUN_OCCLUSION_MARGIN
       )
-      if (w.occluded && w.fadeGroup >= 0) fadedWallGroups.add(w.fadeGroup)
+      const group = w.fadeGroups[quadrant]
+      if (w.occluded && group >= 0) fadedWallGroups.add(group)
     }
     for (const w of wallRuns) {
-      const occ = w.occluded || fadedWallGroups.has(w.fadeGroup)
+      const group = w.fadeGroups[quadrant]
+      const occ = w.occluded || (group >= 0 && fadedWallGroups.has(group))
       w.faded = occ
       if (w.weathering) w.weathering.visible = !occ
       if (w.ghostMesh) {
