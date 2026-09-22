@@ -36,6 +36,18 @@ impl PushedTrade {
     }
 }
 
+/// Whether a player is in bed. The furniture a player occupies rides
+/// `Player::object_type` so every client can draw them in it, and
+/// `is_sleeping_action` is the same bed list the server's own `is_npc_asleep`
+/// reads — so this answers the question the server will answer, without
+/// having to model the NPC's schedule or the world clock here.
+pub fn is_asleep(player: &onlinerpg_shared::Player) -> bool {
+    player
+        .object_type
+        .as_deref()
+        .is_some_and(onlinerpg_shared::schedule::is_sleeping_action)
+}
+
 impl SharedState {
     /// Returns true if any non-NPC (human) player is in `nearby_players`.
     pub fn has_nearby_human_players(&self) -> bool {
@@ -232,14 +244,23 @@ impl SharedState {
                 .is_some_and(|p| p.name.eq_ignore_ascii_case(name_or_id))
     }
 
-    /// The nearest NPC merchant on our floor, for trade actions that omit a
-    /// merchant name. Usually there is exactly one in range, so guessing is
-    /// safe and spares the LLM from naming it.
+    /// The nearest NPC merchant on our floor who can actually trade, for
+    /// trade actions that omit a merchant name. Usually there is exactly one
+    /// in range, so guessing is safe and spares the LLM from naming it.
+    ///
+    /// Asleep is not a shop. The server refuses every trade with a sleeping
+    /// NPC (`trading.rs`, "The trader is asleep"), and these NPCs keep shop
+    /// hours — they walk home and get into bed. Counting one as the merchant
+    /// we came for is what had a worker stand over a sleeping shopkeeper
+    /// firing purchases that could only be refused, calling the trip done,
+    /// and going back to work no better supplied than it came.
     pub fn nearest_merchant(&self) -> Option<PlayerId> {
         let self_pos = self.self_player.as_ref().map(|p| p.position)?;
         self.players_on_my_floor()
             .filter(|(_, p)| {
-                p.is_official_npc && crate::shop_info::merchant_shop(&p.name).is_some()
+                p.is_official_npc
+                    && crate::shop_info::merchant_shop(&p.name).is_some()
+                    && !is_asleep(p)
             })
             .min_by(|(_, a), (_, b)| {
                 let da = a.position.dist_xz_sq(&self_pos);
@@ -247,6 +268,21 @@ impl SharedState {
                 da.total_cmp(&db)
             })
             .map(|(id, _)| *id)
+    }
+
+    /// A shopkeeper in bed within sight, by name. Only for the message a
+    /// worker leaves behind: "no merchant anywhere in town" and "the shops
+    /// are shut until morning" are the same empty-handed trip, and only the
+    /// second one is worth waiting out rather than reconfiguring.
+    pub fn sleeping_merchant_nearby(&self) -> Option<&str> {
+        self.nearby_players
+            .values()
+            .find(|p| {
+                p.is_official_npc
+                    && crate::shop_info::merchant_shop(&p.name).is_some()
+                    && is_asleep(p)
+            })
+            .map(|p| p.name.as_str())
     }
 
     /// Build a text summary of current world state for the LLM prompt.
