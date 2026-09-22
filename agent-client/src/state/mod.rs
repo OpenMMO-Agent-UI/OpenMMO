@@ -56,7 +56,7 @@ use onlinerpg_shared::inventory::GroundItem;
 use onlinerpg_shared::pathfinding::{self, PassabilityCache, PathResult};
 use onlinerpg_shared::Position;
 use onlinerpg_shared::{
-    Character, ClientMessage, Monster, MonsterState, Player, PlayerId, ServerMessage,
+    Character, ClientMessage, Monster, MonsterState, NoSpawnZone, Player, PlayerId, ServerMessage,
 };
 use onlinerpg_terrain::height::HeightSampler;
 use rand::Rng;
@@ -187,6 +187,7 @@ mod world_state;
 pub use commands::ActionProgress;
 pub use events::EventUrgency;
 pub use inventory::{Carried, CarriedBagCopies};
+pub(crate) use movement::TOWN_MARGIN;
 pub use movement::{MoveTarget, MoveTargetError};
 pub use social::{PendingFriendRequest, PendingPartyInvite, PendingPartySummon, PushedTrade};
 pub use world_cache::WorldCache;
@@ -246,6 +247,15 @@ pub struct SharedState {
     /// successful purchase — a satisfied shopper stops shopping for a
     /// while even if other wishes remain.
     pub trade_satiated_until: Option<std::time::Instant>,
+    /// Surface cells found to be water, which routes plan around.
+    pub wet_cells: std::collections::HashSet<(i32, i32)>,
+    /// A worker drives us: eat on the move once hunger costs the sprint.
+    pub eats_on_the_move: bool,
+    /// Satiation when the last on-the-move bite went out, so the next waits
+    /// for the server's answer.
+    pub snacked_at: Option<u32>,
+    /// Knight only: no Guardian Ward recast before this.
+    pub ward_ready_at: Option<std::time::Instant>,
     /// True while at least one player has our trade window open (server
     /// `TradeBusy`). We stay put and keep serving them — the LLM's movement
     /// actions are suppressed — until the trade ends.
@@ -305,6 +315,8 @@ pub struct SharedState {
     /// Items lying on the ground, keyed by instance id (from the join
     /// snapshot plus GroundItemSpawned/Appeared/Removed).
     ground_items: HashMap<u64, GroundItem>,
+    /// Ground items a worker failed to pick up and no longer goes for.
+    pub loot_given_up: std::collections::HashSet<u64>,
     /// From `NpcConfig::always_sprint`; the hunger gate still applies —
     /// see [`Self::sprint_allowed`].
     pub always_sprint: bool,
@@ -383,8 +395,17 @@ pub struct SharedState {
     pub world_view: onlinerpg_shared::interest::WorldView,
     pub pending_terrain: Vec<crate::terrain_snapshots::PendingTerrain>,
     pub terrain_notify: Arc<tokio::sync::Notify>,
+    /// When the next `ResyncWorld` may go out. Asking on every tick until
+    /// the join view landed queued dozens of resets that the server replayed
+    /// for a minute, each one cancelling the step the body was on.
+    pub resync_due_at: Option<std::time::Instant>,
     /// Current game time: is_night flag from server
     pub is_night: Option<bool>,
+    /// The server's nightly clock, mirrored: `game_day + is_after_sunset`.
+    /// Both the dungeon reset and the chest's one-open-per-character key off
+    /// it, so a worker waiting outside knows the chest has refilled without
+    /// the `DungeonReset` only those underground receive.
+    pub night_epoch: Option<i64>,
     pub schedule_period: Option<onlinerpg_shared::schedule::SchedulePeriod>,
     pub weather: crate::weather::Weather,
     /// Serin's dark day (the merchants' meeting night), from the game date.
@@ -426,6 +447,24 @@ pub struct SharedState {
     pub urgent_notify: Arc<Notify>,
     /// Commands queued while processing server events.
     pending_commands: Vec<ClientMessage>,
+    /// Towns: the zones monsters may not spawn in, which is how a worker
+    /// finds town and knows to walk out of one. Fetched per terrain region
+    /// (see `fetch_no_spawn_zones_around`), not received on join — protocol
+    /// v37 deleted `ServerMessage::NoSpawnZones` along with the client-driven
+    /// spawn system, and a field nothing fills reads as "no towns anywhere",
+    /// which silently parks the fighter wherever it happens to stand.
+    pub no_spawn_zones: Vec<NoSpawnZone>,
+    /// Terrain regions whose zone file has already been fetched, so moving
+    /// around a town does not re-ask for it on every chunk crossing.
+    pub fetched_zone_regions: HashSet<(i32, i32)>,
+    /// Set by a worker while it walks a leg it is willing to give up, holding
+    /// the level margin its eligibility test uses. A walk otherwise runs to
+    /// its waypoint no matter what appears — and the server spawns ambient
+    /// monsters about 20 m ahead of a walker, inside a ±30° cone off the
+    /// heading, so the thing worth fighting lands squarely in the stretch the
+    /// fighter is not looking at. `None` for the LLM driver, whose walks are
+    /// unchanged.
+    pub abandon_leg_for: Option<u32>,
     /// Spectator panel handle; feeds it chat/combat/system lines
     watch: Option<Arc<crate::watch::NpcWatch>>,
     /// Running follow loop: (target name, task handle). Anything that takes
@@ -460,6 +499,10 @@ impl SharedState {
             self_bag: Vec::new(),
             self_equipped: HashMap::new(),
             trade_satiated_until: None,
+            ward_ready_at: None,
+            wet_cells: Default::default(),
+            eats_on_the_move: false,
+            snacked_at: None,
             trade_busy: false,
             trade_declined_until: HashMap::new(),
             self_fishing: false,
@@ -481,6 +524,7 @@ impl SharedState {
             merchant_buyback: HashMap::new(),
             nearby_monsters: HashMap::new(),
             ground_items: HashMap::new(),
+            loot_given_up: Default::default(),
             always_sprint: true,
             plays_music: false,
             keepsake_ids: Vec::new(),
@@ -512,9 +556,11 @@ impl SharedState {
             splat_sampler,
             world_cache,
             world_view: Default::default(),
+            resync_due_at: None,
             pending_terrain: Vec::new(),
             terrain_notify: Arc::default(),
             is_night: None,
+            night_epoch: None,
             schedule_period: None,
             weather: crate::weather::Weather::default(),
             is_serin_dark_day: None,
@@ -534,6 +580,9 @@ impl SharedState {
             last_player_attack_at: None,
             urgent_notify: Arc::new(Notify::new()),
             pending_commands: Vec::new(),
+            no_spawn_zones: Vec::new(),
+            fetched_zone_regions: HashSet::new(),
+            abandon_leg_for: None,
             watch,
             follow_task: None,
             wake_urgency: EventUrgency::Noise,

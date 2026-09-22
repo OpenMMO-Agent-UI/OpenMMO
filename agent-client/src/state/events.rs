@@ -16,6 +16,10 @@ use onlinerpg_shared::fishing::{auto_stance, FishingAction, HOOK_REACTION_MS, ST
 use std::ops::RangeInclusive;
 use std::time::Duration;
 
+/// The server opens a view at join unasked; give it this long to arrive.
+const RESYNC_GRACE: Duration = Duration::from_secs(3);
+const RESYNC_RETRY: Duration = Duration::from_secs(3);
+
 impl SharedState {
     /// Hand the queued sick-room respawns to the driver, emptying the queue.
     pub fn drain_recent_respawns(&mut self) -> Vec<(String, u32)> {
@@ -303,6 +307,27 @@ impl SharedState {
         }
     }
 
+    /// A request inside a running retry window waits for it: the server
+    /// answers every `ResyncWorld` with a full reset.
+    pub fn request_resync(&mut self) {
+        self.world_view.synchronized = false;
+        if self.resync_due_at.is_none() {
+            self.resync_due_at = Some(std::time::Instant::now());
+        }
+    }
+
+    pub fn take_resync_due(&mut self) -> bool {
+        if self.world_view.synchronized {
+            return false;
+        }
+        let now = std::time::Instant::now();
+        if self.resync_due_at.is_some_and(|at| at > now) {
+            return false;
+        }
+        self.resync_due_at = Some(now + RESYNC_RETRY);
+        true
+    }
+
     pub fn push_event(&mut self, msg: ServerMessage) -> EventUrgency {
         if let ServerMessage::WorldUpdate {
             world_epoch,
@@ -319,13 +344,8 @@ impl SharedState {
                 .world_view
                 .accept(world_epoch, *generation, *sequence, *reset, events)
             {
-                if !self.world_view.synchronized
-                    && !self
-                        .pending_commands
-                        .iter()
-                        .any(|msg| matches!(msg, ClientMessage::ResyncWorld))
-                {
-                    self.pending_commands.push(ClientMessage::ResyncWorld);
+                if !self.world_view.synchronized {
+                    self.request_resync();
                 }
                 return EventUrgency::Noise;
             }
@@ -335,8 +355,7 @@ impl SharedState {
                 .unwrap()
                 .ensure_world_epoch(world_epoch)
             {
-                self.world_view.synchronized = false;
-                self.pending_commands.push(ClientMessage::ResyncWorld);
+                self.request_resync();
                 return EventUrgency::Noise;
             }
             self.world_view.synchronized = *ready;
@@ -433,14 +452,7 @@ impl SharedState {
                     .unwrap()
                     .view_complete(viewer, &self.world_view)
                 {
-                    self.world_view.synchronized = false;
-                    if !self
-                        .pending_commands
-                        .iter()
-                        .any(|msg| matches!(msg, ClientMessage::ResyncWorld))
-                    {
-                        self.pending_commands.push(ClientMessage::ResyncWorld);
-                    }
+                    self.request_resync();
                 }
             }
             return urgency;
@@ -465,6 +477,8 @@ impl SharedState {
                     world.remove_estate_chest_view(id);
                 }
                 self.in_game = true;
+                self.world_view.synchronized = false;
+                self.resync_due_at = Some(std::time::Instant::now() + RESYNC_GRACE);
                 self.self_player_id = Some(player.id);
                 self.self_player = Some(player.clone());
                 self.self_mana = None;
@@ -547,19 +561,27 @@ impl SharedState {
                     .unwrap()
                     .set_dungeon_doors(entrance_id, doors);
             }
+            // `None` is the door leaving the interest set, not the door
+            // shutting: nothing but a locked door closes on its own, so the
+            // last state seen is the best guess for a route across a floor
+            // we no longer stand on — reading it as shut sealed every climb
+            // back up, since the mover only opens doors on its own floor.
+            // The server restates the real state the moment it is back in
+            // range.
             ServerMessage::DungeonDoorState {
                 entrance_id,
                 depth,
                 door_id,
-                is_open,
+                is_open: Some(is_open),
             } => {
                 self.world_cache.write().unwrap().set_dungeon_door(
                     entrance_id,
                     *depth,
                     *door_id,
-                    is_open.unwrap_or(false),
+                    *is_open,
                 );
             }
+            ServerMessage::DungeonDoorState { is_open: None, .. } => {}
             ServerMessage::DungeonPropState {
                 entrance_id,
                 depth,
@@ -642,6 +664,12 @@ impl SharedState {
                 } else if self.held_pose().is_some() {
                     self.set_self_pose(None, None);
                 }
+            }
+            // Sunset swept the dungeons: guardians are back up and the chests
+            // have refilled. Only players underground at the time are told, so
+            // `night_epoch` above carries the same news to one waiting outside.
+            ServerMessage::DungeonReset => {
+                self.treasure_chests_spent.clear();
             }
             ServerMessage::DungeonPropBroken {
                 ref entrance_id,
@@ -1309,9 +1337,16 @@ impl SharedState {
                 return urgency;
             }
             ServerMessage::GameTimeSync { datetime, is_night } => {
-                let dark = onlinerpg_shared::moon::is_serin_dark_day(
-                    onlinerpg_shared::moon::game_day_index(datetime),
-                );
+                let day = onlinerpg_shared::moon::game_day_index(datetime);
+                let dark = onlinerpg_shared::moon::is_serin_dark_day(day);
+                // The server's own `night_epoch`, recomputed from the clock it
+                // just sent. A flip is nightfall: the dungeons reset and every
+                // chest owes its once-a-night again.
+                let epoch = day + i64::from(onlinerpg_shared::celestial::is_after_sunset(datetime));
+                if self.night_epoch.is_some_and(|seen| seen != epoch) {
+                    self.treasure_chests_spent.clear();
+                }
+                self.night_epoch = Some(epoch);
                 if !dark {
                     self.meeting_turns = None;
                 }

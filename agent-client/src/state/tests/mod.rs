@@ -138,7 +138,7 @@ fn cluttered_dungeon_state() -> (
     dungeon_state_at(d.entrance.x, d.entrance.z)
 }
 
-fn dungeon_state_at(
+pub(crate) fn dungeon_state_at(
     x: f32,
     z: f32,
 ) -> (
@@ -187,7 +187,7 @@ fn coordinates_in(line: &str) -> Vec<(f32, f32)> {
 }
 
 /// Put the agent on `depth`, standing on `cell`.
-fn stand_at(
+pub(crate) fn stand_at(
     s: &mut SharedState,
     dungeon: &crate::dungeon::Dungeon,
     depth: u8,

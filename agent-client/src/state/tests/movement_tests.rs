@@ -251,6 +251,26 @@ async fn a_step_sprints_only_while_the_server_would_allow_it() {
     assert!(sprinting_at(None, true, None).await);
 }
 
+#[test]
+fn a_dry_route_goes_round_known_water() {
+    let (mut s, _rx) = test_state();
+    s.self_player = Some(test_player(0.5, 0.5));
+    let straight = s.find_dry_path_to(10.5, 0.5, 0);
+    assert_eq!(straight.waypoints.len(), 1, "no water known, straight line");
+
+    s.wet_cells = (-15..=15).map(|z| (5, z)).collect();
+    let dry = s.find_dry_path_to(10.5, 0.5, 0);
+    assert!(dry.found);
+    let wet: Vec<_> = s.wet_cells.iter().copied().collect();
+    let mut from = (0.5, 0.5);
+    for wp in &dry.waypoints {
+        assert!(!pathfinding::segment_enters_cells(
+            from.0, from.1, wp.x, wp.z, &wet
+        ));
+        from = (wp.x, wp.z);
+    }
+}
+
 #[tokio::test]
 async fn movement_waits_for_current_server_progress_and_never_adopts_a_stale_goal() {
     use onlinerpg_shared::messages::MoveStatus;

@@ -6,9 +6,10 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use onlinerpg_shared::{ClientMessage, PlayerId};
+use onlinerpg_shared::ability::{AbilityId, GUARDIAN_WARD_DURATION_MS, GUARDIAN_WARD_MANA_COST};
+use onlinerpg_shared::{CharacterClass, ClientMessage, PlayerId};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
@@ -114,6 +115,18 @@ pub(super) async fn tick_combat(
     // Send attack
     {
         let mut s = state.lock().await;
+        if ward_due(&s, Instant::now()) {
+            s.ward_ready_at =
+                Some(Instant::now() + Duration::from_millis(GUARDIAN_WARD_DURATION_MS));
+            let cmd = ClientMessage::UseAbility {
+                ability: AbilityId::GuardianWard,
+                monster_id: None,
+                target_player_id: None,
+            };
+            if let Err(e) = s.send_command(cmd).await {
+                error!("Failed to send Guardian Ward: {e}");
+            }
+        }
         let cmd = ClientMessage::PlayerAttack {
             monster_id: monster_id.to_string(),
         };
@@ -124,6 +137,16 @@ pub(super) async fn tick_combat(
     }
 
     true
+}
+
+/// A knight opens every fight under Guardian Ward and renews it as it lapses.
+fn ward_due(s: &SharedState, now: Instant) -> bool {
+    s.self_player
+        .as_ref()
+        .is_some_and(|p| p.class == CharacterClass::Knight)
+        && s.self_mana
+            .is_some_and(|(mana, _)| mana >= GUARDIAN_WARD_MANA_COST)
+        && s.ward_ready_at.is_none_or(|at| now >= at)
 }
 
 pub(super) enum ChaseResult {
@@ -221,6 +244,24 @@ pub(super) async fn walk_to_point(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_knight_with_mana_wards_once_per_duration() {
+        let (mut s, _rx) = crate::state::tests::test_state();
+        let mut me = crate::state::tests::test_player(0.0, 0.0);
+        me.class = CharacterClass::Knight;
+        s.self_player = Some(me);
+        let now = Instant::now();
+        s.self_mana = Some((GUARDIAN_WARD_MANA_COST - 1, 10));
+        assert!(!ward_due(&s, now));
+        s.self_mana = Some((GUARDIAN_WARD_MANA_COST, 10));
+        assert!(ward_due(&s, now));
+        s.ward_ready_at = Some(now + Duration::from_millis(GUARDIAN_WARD_DURATION_MS));
+        assert!(!ward_due(&s, now));
+        s.self_player.as_mut().unwrap().class = CharacterClass::Barbarian;
+        s.ward_ready_at = None;
+        assert!(!ward_due(&s, now));
+    }
 
     /// Wherever we stop, the server has to agree we are in range — it measures
     /// from the chest, we walk to a cell that can be a metre off it.
