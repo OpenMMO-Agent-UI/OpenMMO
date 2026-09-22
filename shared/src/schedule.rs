@@ -12,6 +12,15 @@ pub const CAMPFIRE_MEAL_ACTION: &str = "campfire_meal";
 pub const CAMPFIRE_ACTION: &str = "campfire";
 const MEAL_DURATION_HOURS: f64 = 0.5;
 
+/// Whether an occupied `object_type` is a bed. Both halves of a sleep check
+/// read it: the server's `is_npc_asleep` goes through the schedule entry an
+/// NPC is currently on, and a client only ever sees the furniture the NPC is
+/// in — `Player::object_type`, which is this. One list, so the two cannot
+/// disagree about which beds count.
+pub fn is_sleeping_action(action: &str) -> bool {
+    matches!(action, BED_OBJECT_TYPE | "rustic_bed" | "ysolde_field_cot")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaypointActivity {
     pub waypoint: usize,
@@ -137,10 +146,7 @@ impl ScheduleEntry {
     }
 
     pub fn is_sleeping(&self) -> bool {
-        matches!(
-            self.action.as_deref(),
-            Some(BED_OBJECT_TYPE | "rustic_bed" | "ysolde_field_cot")
-        )
+        self.action.as_deref().is_some_and(is_sleeping_action)
     }
 
     pub fn is_fishing(&self) -> bool {
