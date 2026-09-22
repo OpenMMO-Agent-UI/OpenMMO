@@ -303,6 +303,31 @@ impl WorldCache {
         }
     }
 
+    /// Test-only: the server only ever reports one door at a time via
+    /// `set_dungeon_door`; this bulk form exists to seed reachability tests.
+    #[cfg(test)]
+    pub(crate) fn set_dungeon_doors(&mut self, id: &str, doors: &[(u8, u32)]) {
+        let touched: HashSet<u8> = self
+            .dungeon_doors
+            .keys()
+            .filter(|(k, _)| k == id)
+            .map(|(_, depth)| *depth)
+            .chain(doors.iter().map(|(depth, _)| *depth))
+            .collect();
+        for depth in &touched {
+            self.dungeon_doors.remove(&(id.to_string(), *depth));
+        }
+        for (depth, door_id) in doors {
+            self.dungeon_doors
+                .entry((id.to_string(), *depth))
+                .or_default()
+                .insert(*door_id);
+        }
+        for depth in touched {
+            self.rebuild_dungeon_floor(id, depth);
+        }
+    }
+
     pub fn set_dungeon_broken_props(&mut self, id: &str, depth: u8, broken: Vec<u32>) {
         let key = (id.to_string(), depth);
         if self.dungeon_broken_props.get(&key) == Some(&broken) {

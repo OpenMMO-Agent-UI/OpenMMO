@@ -16,6 +16,9 @@ pub struct ItemDef {
     pub base_price: Option<i64>,
     #[serde(rename = "equipSlot")]
     pub equip_slot: Option<EquipSlot>,
+    /// Kilograms, against the server's STR-derived carry cap.
+    #[serde(default)]
+    pub weight: f32,
     #[serde(default)]
     pub category: Option<String>,
     #[serde(rename = "weaponType", default)]
@@ -35,8 +38,6 @@ pub struct ItemDef {
     pub nutrition: Option<u32>,
     #[serde(rename = "grillsInto", default)]
     pub grills_into: Option<String>,
-    #[serde(default)]
-    pub weight: f32,
 }
 
 impl ItemDef {
