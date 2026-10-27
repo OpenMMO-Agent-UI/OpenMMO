@@ -127,6 +127,25 @@
     })
   })
 
+  // Both of this fork's entry points — the spectator view (`?observe=`) and
+  // desktop manual play (`#manual=`) — start at `screen = 'game'` without
+  // going through handleStartGame, which is the only place that imports the
+  // game screen. Upstream made that module lazy in f8ea75f8 ("Improve client
+  // loading with lazy screens and cached bundles"); our patch rebased onto it
+  // without a conflict and silently stopped rendering, because
+  // `{#if screen === 'game' && gameScreen}` then falls all the way through to
+  // the login screen. A spectator watched their character move while being
+  // told sign-in was unavailable.
+  onMount(async () => {
+    if (!isObserver && !manualBootstrap) return
+    try {
+      gameScreen ??= await import('./lib/components/game-screen')
+    } catch (error) {
+      console.error('Unable to load game screen', error)
+      observerError = $t('loading.failed')
+    }
+  })
+
   // Desktop manual mode already completed OAuth and character selection.
   // Consume the short-lived fragment once, clear it from browser history, and
   // enter that exact character without rendering duplicate onboarding.
