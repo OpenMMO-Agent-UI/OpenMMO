@@ -139,7 +139,17 @@
   onMount(async () => {
     if (!isObserver && !manualBootstrap) return
     try {
-      gameScreen ??= await import('./lib/components/game-screen')
+      // Both of them. f8ea75f8 made two modules lazy and put each behind a
+      // different step of the character-select flow — game-screen in
+      // handleStartGame, SceneCanvas in handleLogin — and these paths call
+      // neither. Loading only the first still left the scene unmounted, so
+      // `isSceneCompiling` never cleared and the view sat on "Preparing
+      // world..." forever.
+      ;[gameScreen, SceneCanvas] = await Promise.all([
+        gameScreen ?? import('./lib/components/game-screen'),
+        SceneCanvas ??
+          import('./lib/components/SceneCanvas.svelte').then((m) => m.default),
+      ])
     } catch (error) {
       console.error('Unable to load game screen', error)
       observerError = $t('loading.failed')
