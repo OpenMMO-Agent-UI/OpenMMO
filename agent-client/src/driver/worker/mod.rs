@@ -310,6 +310,46 @@ pub(crate) fn should_drink_potion(s: &SharedState, cfg: &WorkerConfig) -> bool {
     health_pct(s) < cfg.low_health_pct && bag_units_in_category(s, "healing_potion") > 0
 }
 
+/// A dungeoneer standing on the surface with no healing potion left, while
+/// its config says to carry some. Every other worker that runs short just
+/// fights more carefully; a dungeon has a floor the character cannot heal
+/// its way back off, so this one is a trip of its own — and, below, a reason
+/// not to walk in at all.
+///
+/// Underground it is deliberately not asked: the answer down there is the
+/// run already in progress, and the scroll it would spend is the low-health
+/// escape.
+pub(crate) fn needs_potions(s: &SharedState, cfg: &WorkerConfig) -> bool {
+    cfg.kind == WorkerKind::Dungeoneer
+        && cfg.potion_stock > 0
+        && s.self_floor_level >= 0
+        && bag_units_in_category(s, "healing_potion") == 0
+        && can_afford_a_potion(s)
+}
+
+/// Whether the purse could cover the cheapest healing potion in the game.
+/// The base price is a floor — merchants mark up — which is the forgiving
+/// direction for the only question this answers: whether waiting for a shop
+/// can ever help.
+///
+/// It is what keeps `needs_potions` from becoming a deadlock. A dungeoneer
+/// earns through the chest, so "no potions and no gold" has only one way out
+/// and it is downward; holding at the door there would park the worker
+/// forever over a trip that can never succeed. Unknown gold counts as
+/// affordable: the first `GoldUpdate` lands seconds into a session, and a few
+/// seconds of waiting beats diving on an assumption.
+fn can_afford_a_potion(s: &SharedState) -> bool {
+    let Some(gold) = s.self_gold else {
+        return true;
+    };
+    let cheapest = crate::item_defs::all_ids()
+        .into_iter()
+        .filter(|id| category(id) == Some("healing_potion"))
+        .filter_map(|id| crate::item_defs::get(id).and_then(|d| d.base_price))
+        .min();
+    cheapest.is_some_and(|price| gold >= price)
+}
+
 /// Out of potions at low health: read the scroll and take the town trip.
 pub(crate) fn should_use_return_scroll(s: &SharedState, cfg: &WorkerConfig) -> bool {
     health_pct(s) < cfg.low_health_pct
@@ -1139,7 +1179,7 @@ async fn next_step(
     // The dungeoneer adds one trigger of its own: an emptied chest is a haul
     // to sell and a descent's worth of potions to replace, however light the
     // bag reads.
-    let town_wanted = should_town_trip(&s, cfg) || run.resupply_due();
+    let town_wanted = should_town_trip(&s, cfg) || run.resupply_due() || needs_potions(&s, cfg);
     // A scroll teleports; it does not path. So it can answer a finished run
     // from the bottom floor, where walking to a merchant cannot. Without this
     // the only way to the scroll was `resupply_due()`, which waits until the
@@ -1156,7 +1196,14 @@ async fn next_step(
         // far end of the map is survivable in a way stranded at 10% is not.
         // `InTown` is what stops the next tick reading the same trigger and
         // burning the rest of the stack.
-        if bag_units_in_category(&s, "return_scroll") > 1 {
+        //
+        // And never from inside the town itself: it teleports to where we are
+        // standing. That was always a little wasteful and is now worse than
+        // that — a trip wanted because the belt is empty retries every five
+        // minutes while the shops are shut, and one scroll per retry is the
+        // whole stack gone by morning, including the one held back for the
+        // low-health escape.
+        if !in_town(&s) && bag_units_in_category(&s, "return_scroll") > 1 {
             if let Some(scroll) = bag_item_in_category(&s, "return_scroll") {
                 run.town_trip_started();
                 info!("[{label}] Worker: reading a return scroll to town (bag {load}%)");
@@ -1226,7 +1273,14 @@ async fn next_step(
             // Standing on this one with nobody in sight: try the next quarter.
             *town_stop += 1;
         }
-        warn!("[{label}] Worker: no merchant anywhere in town, back to work");
+        match s.sleeping_merchant_nearby() {
+            // Worth telling apart: this town has a shop and it is shut, so
+            // the retry delay is the whole fix and nothing needs changing.
+            Some(name) => warn!(
+                "[{label}] Worker: {name} is asleep and no other merchant is open — trying again                  later"
+            ),
+            None => warn!("[{label}] Worker: no merchant anywhere in town, back to work"),
+        }
         *errand = Errand::Work;
         *town_stop = 0;
         *town_blocked_until = Some(TownPause {
@@ -1368,6 +1422,20 @@ fn leave_a_useless_town(s: &SharedState, cfg: &WorkerConfig, broke: bool) -> Vec
         Some((x, z)) => vec![Step::Walk { x, z }],
         None => vec![Step::Idle],
     }
+}
+
+/// Standing inside the town, where a return scroll has nothing left to do:
+/// it teleports to the town, and we are in it. The town is a no-spawn zone,
+/// which is the same fact `leave_a_useless_town` reads to decide a fighter is
+/// wasting its time standing here.
+fn in_town(s: &SharedState) -> bool {
+    let Some(me) = s.self_player.as_ref().map(|p| p.position) else {
+        return false;
+    };
+    s.self_floor_level >= 0
+        && s.no_spawn_zones
+            .iter()
+            .any(|zone| zone.contains(me.x, me.z))
 }
 
 /// The purse is empty: known gold, none to spend. Only a *known* empty purse

@@ -526,6 +526,21 @@ pub(crate) fn step(
         return claim(s, &dungeon, run);
     }
 
+    // On the surface with the potion belt empty: what comes next is a walk
+    // into a dungeon this character cannot heal in, and the floors it is
+    // pointed at are not survivable without one. The town trip ahead of this
+    // has already asked for them, so arriving here means the shops could not
+    // sell any — closed for the night, or the purse is short. Waiting by the
+    // door costs a night; diving costs the night *and* the gear, over and
+    // over, until the death limit halts the run anyway.
+    if depth == 0 && super::needs_potions(s, cfg) {
+        run.say(format!(
+            "No healing potions, and no merchant could sell any — waiting before entering {}.",
+            dungeon.name
+        ));
+        return vec![Step::Idle];
+    }
+
     match key_owed(s, &dungeon, depth) {
         // Nothing locked below, or the key is in the bag: keep going down.
         None | Some((_, _, true)) => {

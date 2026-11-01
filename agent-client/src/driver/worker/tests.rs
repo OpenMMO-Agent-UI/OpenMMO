@@ -149,6 +149,76 @@ fn a_configured_restock_item_falls_back_to_whatever_the_nearby_merchant_actually
     assert_eq!(id, "greater_healing_potion");
 }
 
+/// A return scroll teleports to the town. Reading one while standing in the
+/// town is a wasted scroll, and the trips wanted because the potion belt is
+/// empty retry every five minutes while the shops are shut — one scroll per
+/// retry is the whole stack, including the one held back to escape a fight.
+#[test]
+fn the_town_is_not_somewhere_a_scroll_can_take_you() {
+    let mut s = state_at(0.0, 0.0);
+    assert!(!in_town(&s), "no zones known yet: assume the field");
+    s.no_spawn_zones = vec![NoSpawnZone {
+        min_x: -50.0,
+        min_z: -50.0,
+        max_x: 50.0,
+        max_z: 50.0,
+    }];
+    assert!(in_town(&s));
+
+    s.self_player = Some(test_player(500.0, 0.0));
+    assert!(
+        !in_town(&s),
+        "out in the field, the scroll is worth reading"
+    );
+
+    // Underground is not the town however the footprint reads from above.
+    s.self_player = Some(test_player(0.0, 0.0));
+    s.self_floor_level = -3;
+    assert!(!in_town(&s));
+}
+
+/// A shopkeeper keeps hours: they walk home and get into bed, and the server
+/// refuses every trade with one who has ("The trader is asleep"). A worker
+/// that counted a sleeping NPC as the merchant it came for stood over them
+/// firing purchases that could only be refused, called the trip done, and
+/// went back to work no better supplied — once a night, every night.
+#[test]
+fn a_shopkeeper_in_bed_is_not_a_shop() {
+    let mut s = state_at(0.0, 0.0);
+    let mut rica = test_player(3.0, 0.0);
+    rica.id = PlayerId::from(3);
+    rica.name = "Rica".to_string();
+    rica.is_official_npc = true;
+    let rica_id = rica.id;
+    s.nearby_players.insert(rica_id, rica);
+    assert_eq!(
+        s.nearest_merchant(),
+        Some(rica_id),
+        "awake, she is the shop"
+    );
+    assert_eq!(s.sleeping_merchant_nearby(), None);
+
+    // The furniture a player occupies rides `object_type` for every client to
+    // draw; a bed there is the same thing the server's own sleep check reads.
+    s.nearby_players.get_mut(&rica_id).unwrap().object_type =
+        Some(onlinerpg_shared::schedule::BED_OBJECT_TYPE.to_string());
+    assert_eq!(
+        s.nearest_merchant(),
+        None,
+        "asleep is not a shop — the trip has not arrived yet"
+    );
+    assert_eq!(
+        s.sleeping_merchant_nearby(),
+        Some("Rica"),
+        "and the shut shop is named, so the wait reads as a wait"
+    );
+    assert_eq!(
+        potions_to_buy(&s, &cfg()),
+        None,
+        "nothing to order from a sleeping shop"
+    );
+}
+
 #[test]
 fn a_worker_bites_on_the_move_once_per_hunger_reading() {
     let mut s = state_at(0.0, 0.0);
@@ -2472,7 +2542,11 @@ mod dungeon {
     /// Old Crypt: the shallowest dungeon, and the only one whose whole run
     /// fits in a test — one locked floor, whose key is also the chest's.
     fn crypt() -> (SharedState, Arc<Dungeon>) {
-        let (s, d, _rx) = dungeon_state_at(-1450.0, 4720.0);
+        let (mut s, d, _rx) = dungeon_state_at(-1450.0, 4720.0);
+        // Equipped, because that is the only state a dungeoneer descends in:
+        // an empty potion belt is a hold at the door, not a descent, and
+        // every test below is about where it goes, not about supply.
+        bag(&mut s, HEALING_POTION, 1);
         (s, d)
     }
 
@@ -2520,6 +2594,20 @@ mod dungeon {
         let mut m = monster(id, "goblin", x, z);
         m.floor_level = s.self_floor_level;
         see(s, m);
+    }
+
+    /// Standing where the chest was opened, with it already emptied: the
+    /// start of every test about what a finished run does next.
+    fn at_the_chest() -> (SharedState, Arc<Dungeon>, onlinerpg_shared::Position, u8) {
+        let (mut s, d) = crypt();
+        let depth = d.max_depth();
+        let chest = d.treasure_position().unwrap();
+        let cell = onlinerpg_shared::dungeon::world_to_cell(&d.entrance, chest.x, chest.z);
+        let layout = d.layouts().last().unwrap();
+        let room = layout.room_at(cell.0, cell.1).unwrap();
+        stand_at(&mut s, &d, depth, layout.stand_cell(room.center()));
+        chest_emptied(&mut s, &d);
+        (s, d, chest, depth)
     }
 
     fn chest_emptied(s: &mut SharedState, d: &Dungeon) {
@@ -2825,19 +2913,6 @@ mod dungeon {
     /// underground.
     #[test]
     fn an_emptied_chest_is_swept_up_before_the_climb_out() {
-        // Standing where the chest was opened, with it already emptied.
-        let at_the_chest = || {
-            let (mut s, d) = crypt();
-            let depth = d.max_depth();
-            let chest = d.treasure_position().unwrap();
-            let cell = onlinerpg_shared::dungeon::world_to_cell(&d.entrance, chest.x, chest.z);
-            let layout = d.layouts().last().unwrap();
-            let room = layout.room_at(cell.0, cell.1).unwrap();
-            stand_at(&mut s, &d, depth, layout.stand_cell(room.center()));
-            chest_emptied(&mut s, &d);
-            (s, d, chest, depth)
-        };
-
         let mut run = Run::default();
 
         // The drops are broadcast a moment after the open is answered, so the
@@ -2915,6 +2990,83 @@ mod dungeon {
             !run.resupply_wanted(),
             "a started trip answers the errand, underground or not"
         );
+    }
+
+    /// Supplies can fail to arrive for reasons nothing here controls: the
+    /// shops keep hours, and the purse may not stretch. A dungeon has floors
+    /// a character cannot heal its way back off, so walking in with an empty
+    /// potion belt spends the night *and* the gear — repeatedly, until the
+    /// death limit halts the run anyway. Waiting by the door costs only the
+    /// wait, and the town trip is already retrying behind this.
+    /// `crypt()` equips a potion, so these take it back off.
+    fn empty_belt(s: &mut SharedState) {
+        s.self_bag.retain(|i| i.item_def_id != HEALING_POTION);
+    }
+
+    #[test]
+    fn an_empty_potion_belt_waits_at_the_door_instead_of_diving() {
+        let (mut s, d) = crypt();
+        on_the_surface(&mut s);
+        empty_belt(&mut s);
+        let c = cfg(&d);
+        assert!(
+            needs_potions(&s, &c),
+            "on the surface with nothing to drink: a town trip is owed"
+        );
+        assert_eq!(
+            step(&mut s, &c, &mut Run::default(), &marks()),
+            vec![Step::Idle],
+            "and no descent until it is paid"
+        );
+
+        bag(&mut s, HEALING_POTION, 1);
+        assert!(!needs_potions(&s, &c));
+        assert_ne!(
+            step(&mut s, &c, &mut Run::default(), &marks()),
+            vec![Step::Idle],
+            "one potion is enough to be allowed back in"
+        );
+
+        // A purse that cannot cover one is not a wait, it is a deadlock: the
+        // chest is where a dungeoneer's gold comes from, so the only way out
+        // of broke is down.
+        let (mut broke, d3) = crypt();
+        on_the_surface(&mut broke);
+        empty_belt(&mut broke);
+        broke.self_gold = Some(0);
+        assert!(!needs_potions(&broke, &cfg(&d3)));
+        assert_ne!(
+            step(&mut broke, &cfg(&d3), &mut Run::default(), &marks()),
+            vec![Step::Idle],
+            "waiting for a potion it can never buy is worse than the dive"
+        );
+
+        // A player who turned the stock off is not asking to be minded.
+        let unstocked = WorkerConfig {
+            potion_stock: 0,
+            ..cfg(&d)
+        };
+        let (mut bare, d2) = crypt();
+        on_the_surface(&mut bare);
+        empty_belt(&mut bare);
+        assert!(!needs_potions(&bare, &unstocked));
+        assert_ne!(
+            step(&mut bare, &unstocked, &mut Run::default(), &marks()),
+            vec![Step::Idle],
+            "{} is entered on the player's own terms",
+            d2.name
+        );
+    }
+
+    /// Underground the question is deliberately not asked: the answer down
+    /// there is the run already in progress, and the only scroll left is the
+    /// low-health escape.
+    #[test]
+    fn an_empty_potion_belt_underground_is_not_a_town_trip() {
+        let (mut s, d) = crypt();
+        on_floor(&mut s, &d, 1);
+        empty_belt(&mut s);
+        assert!(!needs_potions(&s, &cfg(&d)));
     }
 
     /// Emptying the chest spends the keys, which puts the very same rule back
