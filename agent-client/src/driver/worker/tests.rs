@@ -2887,6 +2887,36 @@ mod dungeon {
         assert!(run.resupply_due(), "above ground the haul is worth selling");
     }
 
+    /// `resupply_due` deliberately waits until the climb out has succeeded,
+    /// because a merchant cannot be walked to from underground. A scroll is
+    /// the exception and `resupply_wanted` is what exposes it: it teleports,
+    /// so it can end a finished run from the bottom floor. Gating it behind
+    /// the climb it replaces is what left a player's dungeoneer standing
+    /// beside the chest — the climb halted as Stuck, `leaving` never cleared,
+    /// and the scroll was never reachable.
+    #[test]
+    fn an_emptied_chest_wants_resupply_from_underground_too() {
+        let (mut s, d, _, _) = at_the_chest();
+        let mut run = Run::default();
+        step(&mut s, &cfg(&d), &mut run, &marks());
+
+        assert!(
+            run.resupply_wanted(),
+            "the haul is owed a town trip the moment the chest is spent"
+        );
+        assert!(
+            !run.resupply_due(),
+            "but walking to a merchant is still only an answer from the surface"
+        );
+
+        // And the trip is still asked for exactly once.
+        run.town_trip_started();
+        assert!(
+            !run.resupply_wanted(),
+            "a started trip answers the errand, underground or not"
+        );
+    }
+
     /// Emptying the chest spends the keys, which puts the very same rule back
     /// at the start of the section — once the errand it started is done.
     #[test]

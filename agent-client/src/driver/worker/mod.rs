@@ -1140,8 +1140,16 @@ async fn next_step(
     // to sell and a descent's worth of potions to replace, however light the
     // bag reads.
     let town_wanted = should_town_trip(&s, cfg) || run.resupply_due();
-    if *errand == Errand::Work && !waiting_out_a_failed_trip && town_wanted {
-        run.town_trip_started();
+    // A scroll teleports; it does not path. So it can answer a finished run
+    // from the bottom floor, where walking to a merchant cannot. Without this
+    // the only way to the scroll was `resupply_due()`, which waits until the
+    // climb out has already succeeded — and when it could not be pathed the
+    // run halted as Stuck and stood beside the chest indefinitely.
+    let scroll_can_end_the_run = run.resupply_wanted() && !town_wanted;
+    if *errand == Errand::Work
+        && !waiting_out_a_failed_trip
+        && (town_wanted || scroll_can_end_the_run)
+    {
         let load = bag_load_pct(&s);
         // A scroll spends the walk home for one item. The last one is not
         // spent commuting: that is the low-health escape, and stranded at the
@@ -1150,13 +1158,20 @@ async fn next_step(
         // burning the rest of the stack.
         if bag_units_in_category(&s, "return_scroll") > 1 {
             if let Some(scroll) = bag_item_in_category(&s, "return_scroll") {
+                run.town_trip_started();
                 info!("[{label}] Worker: reading a return scroll to town (bag {load}%)");
                 *errand = Errand::InTown;
                 return vec![Step::Use(scroll)];
             }
         }
-        info!("[{label}] Worker: heading to town (bag {load}%)");
-        *errand = Errand::ToTown;
+        // No scroll to spare. Walking is only an answer from the surface, so
+        // underground this falls through and leaves the climb to the
+        // dungeoneer, which keeps trying and reports the halt if it cannot.
+        if town_wanted {
+            run.town_trip_started();
+            info!("[{label}] Worker: heading to town (bag {load}%)");
+            *errand = Errand::ToTown;
+        }
     }
 
     if *errand != Errand::Work {

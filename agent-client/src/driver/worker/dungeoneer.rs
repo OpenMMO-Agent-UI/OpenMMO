@@ -173,11 +173,22 @@ impl Run {
         self.chest_was_spent = spent;
     }
 
-    /// Whether the haul from an emptied chest is still unsold. Only once we
-    /// are out: a merchant cannot be walked to from underground, and the
-    /// errand would spend the trip failing to path out of the floor.
+    /// Whether the haul from an emptied chest is still unsold and we can
+    /// *walk* to a merchant. Only once we are out: there is none underground,
+    /// and the errand would spend the trip failing to path out of the floor.
     pub(super) fn resupply_due(&self) -> bool {
         self.resupply_due && !self.leaving
+    }
+
+    /// The same errand without the "already outside" condition, for the one
+    /// way to answer it from underground: a return scroll does not path
+    /// anywhere, it teleports. Gating the scroll behind the climb it exists
+    /// to replace is what left a finished run standing beside the chest —
+    /// when the climb could not be pathed the leg halted as Stuck, `leaving`
+    /// never cleared, and so `resupply_due` never became true to ask for the
+    /// scroll that would have ended the run.
+    pub(super) fn resupply_wanted(&self) -> bool {
+        self.resupply_due
     }
 
     /// A town trip is under way, so the errand that asked for it is answered
