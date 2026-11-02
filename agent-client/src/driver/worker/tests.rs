@@ -381,6 +381,91 @@ fn the_town_trip_sells_marked_loot_drops_marked_junk_and_keeps_the_kit() {
     assert_eq!(potions_to_buy(&s, &cfg()), None);
 }
 
+/// The Drop mark used to need the game's own `junk` category as well, and
+/// the game calls exactly three items junk — all of them fishing catch. So a
+/// Drop mark on armour, a weapon, a trophy fish, anything a dungeon or a
+/// fight actually produces, did nothing at all and said nothing about it.
+/// The mark now means the mark.
+#[test]
+fn the_drop_mark_is_not_limited_to_the_games_three_junk_items() {
+    let mut s = state_at(0.0, 0.0);
+    bag(&mut s, "leather_helmet", 1);
+    let marked = labels::BagLabels {
+        sellable: Vec::new(),
+        dropable: vec!["leather_helmet".into()],
+    };
+    assert_eq!(
+        junk_list(&s, &marked),
+        vec!["leather_helmet".to_string()],
+        "a marked helmet is dropped, junk category or not"
+    );
+}
+
+/// Two things the mark cannot override, because acting on either costs more
+/// than the item: the kit the same config restocks every town trip, and the
+/// keys the descent exists for — `key_owed` would send the worker back to
+/// farm a key it just threw away, and then throw that one away too.
+#[test]
+fn a_drop_mark_on_the_kit_or_a_dungeon_key_is_read_as_a_slip() {
+    let mut s = state_at(0.0, 0.0);
+    bag(&mut s, HEALING_POTION, 5);
+    bag(&mut s, RETURN_SCROLL, 2);
+    bag(&mut s, "apple", 3);
+    bag(&mut s, "crypt_key_5", 1);
+    let marked = labels::BagLabels {
+        sellable: vec!["crypt_key_5".into(), HEALING_POTION.into()],
+        dropable: vec![
+            HEALING_POTION.into(),
+            RETURN_SCROLL.into(),
+            "apple".into(),
+            "crypt_key_5".into(),
+        ],
+    };
+    assert!(
+        junk_list(&s, &marked).is_empty(),
+        "potions, scrolls, food and keys are never thrown away"
+    );
+    assert!(
+        sell_list(&s, &marked).is_empty(),
+        "and never sold either — same list, same reason"
+    );
+}
+
+/// Marked both ways is read as Sell: it pays, and dropping it afterwards
+/// would queue a `Drop` for an id the sale already cleared out of the bag —
+/// one wasted turn and a confusing `DropFailed` in the feed. An unpriced
+/// item has no sale to prefer, so there the drop still stands.
+#[test]
+fn marked_both_sell_and_drop_is_sold_not_dropped() {
+    let mut s = state_at(0.0, 0.0);
+    bag(&mut s, "gold_ring", 1);
+    let both = labels::BagLabels {
+        sellable: vec!["gold_ring".into()],
+        dropable: vec!["gold_ring".into()],
+    };
+    assert_eq!(sell_list(&s, &both), vec!["gold_ring".to_string()]);
+    assert!(junk_list(&s, &both).is_empty());
+
+    // A dungeon key is priceless in the literal sense — no `basePrice` — so
+    // there is no sale to prefer. It is still kit, so it is still kept; an
+    // unpriced *non*-keeper is the case the rule is written for.
+    let mut unpriced = state_at(0.0, 0.0);
+    bag(&mut unpriced, "old_boot", 1);
+    let boot_both = labels::BagLabels {
+        sellable: vec!["old_boot".into()],
+        dropable: vec!["old_boot".into()],
+    };
+    assert!(
+        sell_list(&unpriced, &boot_both).is_empty(),
+        "a boot fetches nothing"
+    );
+    assert_eq!(
+        junk_list(&unpriced, &boot_both),
+        vec!["old_boot".to_string()],
+        "so the drop is the only thing the marks can mean"
+    );
+}
+
 /// Unmarked loot stays in the bag: the app's sell label is what a worker may
 /// sell, so a bag of unlabelled drops survives the town trip untouched.
 #[test]
@@ -738,7 +823,40 @@ fn only_drops_beside_the_kill_are_worth_the_detour() {
         y: 0.0,
         z: 0.0,
     };
-    assert_eq!(loot_candidates(&s, kill, LOOT_RADIUS), vec![1]);
+    let unmarked = labels::BagLabels::default();
+    assert_eq!(loot_candidates(&s, &unmarked, kill, LOOT_RADIUS), vec![1]);
+}
+
+/// The Drop mark meant "leave it" for loot found lying around and nothing
+/// else: a kill's own drops and the chest's burst came up regardless, so the
+/// one thing the player said they did not want was the one thing they were
+/// guaranteed to carry out of a dungeon. Not picking it up beats picking it
+/// up and dropping it — no turn spent, and the weight never carried.
+#[test]
+fn a_marked_drop_is_not_picked_up_in_the_first_place() {
+    let mut s = state_at(0.0, 0.0);
+    s.remember_ground_item(ground_item(1, "old_boot", 1.0, 0.0, 0));
+    s.remember_ground_item(ground_item(2, "gold_ring", 2.0, 0.0, 0));
+    let kill = onlinerpg_shared::Position {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
+    assert_eq!(
+        loot_candidates(&s, &labels::BagLabels::default(), kill, LOOT_RADIUS),
+        vec![1, 2],
+        "unmarked, both are worth the reach"
+    );
+
+    let marked = labels::BagLabels {
+        sellable: Vec::new(),
+        dropable: vec!["old_boot".to_string()],
+    };
+    assert_eq!(
+        loot_candidates(&s, &marked, kill, LOOT_RADIUS),
+        vec![2],
+        "the boot stays on the floor"
+    );
 }
 
 #[tokio::test]
@@ -3111,30 +3229,56 @@ mod dungeon {
         );
     }
 
-    /// A full bag underground refuses pickups server-side, and a key or the
-    /// chest's haul refused is the whole errand lost. No merchant down there,
-    /// so the marked junk goes on the floor.
+    /// Underground the marked load is shed where we stand, and eagerly — not
+    /// at `bag_full_pct`, which is what this waited for before. Waiting meant
+    /// carrying it for most of the run and then shedding it in whatever
+    /// chamber finally tripped the threshold, quite possibly the boss room, a
+    /// turn at a time. There is no merchant down here for it to become gold,
+    /// the weight is paid again on every step of the descent, and a full bag
+    /// refuses pickups server-side — a key or the chest's haul refused is the
+    /// whole errand lost.
     #[test]
-    fn a_full_bag_underground_drops_its_marked_junk_where_it_stands() {
+    fn marked_items_are_shed_underground_without_waiting_for_a_full_bag() {
         let (mut s, d) = crypt();
         on_floor(&mut s, &d, 1);
+        // A cap nothing in this bag comes near, so a drop here can only be
+        // the mark talking.
         let cfg = WorkerConfig {
-            bag_full_pct: 1,
+            bag_full_pct: 99,
             ..cfg(&d)
         };
-        bag(&mut s, "old_boot", 30);
+        bag(&mut s, "leather_helmet", 1);
         let marked = labels::BagLabels {
             sellable: Vec::new(),
-            dropable: vec!["old_boot".to_string()],
+            dropable: vec!["leather_helmet".to_string()],
         };
 
         assert_eq!(
             step(&mut s, &cfg, &mut Run::default(), &marked),
-            vec![Step::Drop("old_boot".to_string())]
+            vec![Step::Drop("leather_helmet".to_string())],
+            "one light marked item is enough; the cap is not the trigger"
         );
         // Unmarked, it stays: what the app has not released is not ours to bin.
         assert!(!matches!(
             step(&mut s, &cfg, &mut Run::default(), &marks()).as_slice(),
+            [Step::Drop(_)]
+        ));
+    }
+
+    /// And on the surface it is not shed at all — the walk to town is where a
+    /// marked item that someone may yet want to sell gets its last chance,
+    /// and the town trip's own drop is the one that bins it.
+    #[test]
+    fn the_surface_is_not_where_the_dungeoneer_sheds_its_marks() {
+        let (mut s, d) = crypt();
+        on_the_surface(&mut s);
+        bag(&mut s, "leather_helmet", 1);
+        let marked = labels::BagLabels {
+            sellable: Vec::new(),
+            dropable: vec!["leather_helmet".to_string()],
+        };
+        assert!(!matches!(
+            step(&mut s, &cfg(&d), &mut Run::default(), &marked).as_slice(),
             [Step::Drop(_)]
         ));
     }

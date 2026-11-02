@@ -359,6 +359,10 @@ pub(crate) fn should_use_return_scroll(s: &SharedState, cfg: &WorkerConfig) -> b
 
 /// Kit the worker lives on — never sold, never dropped. The reins are the
 /// dearest thing in the bag; a Sellable mark on them is a slip, not an order.
+/// Dungeon keys are here for the same reason and a sharper one: the descent
+/// is what they are for, and `key_owed` sends the worker back to farm a key
+/// it no longer holds — so acting on a mark there is not one lost item, it is
+/// a run that drops the key, re-farms it, and drops it again.
 fn is_keeper(def_id: &str) -> bool {
     matches!(
         category(def_id),
@@ -367,6 +371,7 @@ fn is_keeper(def_id: &str) -> bool {
             | Some("food")
             | Some("fishing_rod")
             | Some("horse_reins")
+            | Some("dungeon_key")
     )
 }
 
@@ -473,15 +478,28 @@ pub(crate) fn sell_list(s: &SharedState, labels: &labels::BagLabels) -> Vec<Stri
     ids
 }
 
-/// Dead weight, dropped in town. Only what the game itself calls junk: plenty
-/// of unpriced items are worth carrying (a coin pouch pays out when used, a
-/// worn starting weapon is the one you are holding). When the app has marked
-/// items with the drop label, only those are dropped.
+/// What the player marked Drop and the worker may actually throw away. An
+/// empty mark list drops nothing, which is the default.
+///
+/// `category == "junk"` used to gate this too, and that made the mark a
+/// near-no-op: the game calls exactly three items junk — `old_boot`,
+/// `clump_of_kelp`, `message_in_a_bottle` — and all three are fishing catch.
+/// So a Drop mark on anything a dungeon or a fight produces did nothing at
+/// all, silently, which is the worst way for a checkbox to behave.
+///
+/// Two things the mark cannot override. `is_keeper`, because a Drop on the
+/// potions the same config restocks every town trip, or on the keys the
+/// descent is for, is a slip whose cost is the run. And an item that will
+/// sell: selling beats dropping outright — it pays — so a double mark is
+/// read as Sell and the drop step is not queued behind a sale that already
+/// emptied the bag of it.
 pub(crate) fn junk_list(s: &SharedState, labels: &labels::BagLabels) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
     for item in &s.self_bag {
         let id = &item.item_def_id;
-        if category(id) == Some("junk") && !ids.contains(id) && labels.dropable.contains(id) {
+        let will_sell = labels.sellable.contains(id)
+            && crate::item_defs::get(id).is_some_and(|d| d.base_price.unwrap_or(0) > 0);
+        if !is_keeper(id) && !will_sell && !ids.contains(id) && labels.dropable.contains(id) {
             ids.push(id.clone());
         }
     }
@@ -617,11 +635,24 @@ pub(super) fn prey_in_reach(s: &SharedState, level_margin: u32) -> bool {
 
 /// Loot lying within `radius` of a point, closest to us first. The caller
 /// passes the kill site, so a distant pile never pulls the worker off course.
-pub(crate) fn loot_candidates(s: &SharedState, near: Position, radius: f32) -> Vec<u64> {
+///
+/// Items marked Drop are left where they lie. The mark already meant this for
+/// loot found lying around (`sellable_on_ground`), and nowhere else: a kill's
+/// own drops and a chest's burst came up regardless, so the one thing the
+/// player said they did not want was the one thing they were guaranteed to
+/// carry. Not picking it up is strictly better than picking it up and
+/// dropping it — it costs no turn, and the weight is never carried at all.
+pub(crate) fn loot_candidates(
+    s: &SharedState,
+    labels: &labels::BagLabels,
+    near: Position,
+    radius: f32,
+) -> Vec<u64> {
     s.ground_items_in_sight()
         .into_iter()
         .filter(|(_, item)| item.position.dist_xz_sq(&near) <= radius * radius)
         .filter(|(_, item)| !s.loot_given_up.contains(&item.instance_id))
+        .filter(|(_, item)| !labels.dropable.contains(&item.item_def_id))
         .map(|(_, item)| item.instance_id)
         .collect()
 }
@@ -1248,6 +1279,12 @@ async fn next_step(
                 });
                 return leave_a_useless_town(&s, cfg, broke);
             }
+            // Same reason as the fisher's: a dropped item does not come back,
+            // so the log names what this trip is about to throw away.
+            let shed = junk_list(&s, labels);
+            if !shed.is_empty() {
+                info!("[{label}] Worker: dropping {} in town", shed.join(", "));
+            }
             // Even a productive trip earns a pause: whatever sent us here may
             // still read as unfixed for a tick or two, and the answer to that
             // is work, not a second lap of the same shop.
@@ -1295,7 +1332,7 @@ async fn next_step(
     // that will not come up (unreachable, too heavy) must not hold the worker
     // at the corpse forever.
     if let Some((site, tries)) = *loot_at {
-        let loot = loot_candidates(&s, site, LOOT_RADIUS);
+        let loot = loot_candidates(&s, labels, site, LOOT_RADIUS);
         match loot.first() {
             Some(id) if tries < MAX_LOOT_TRIES => {
                 *loot_at = Some((site, tries + 1));
@@ -1323,6 +1360,10 @@ async fn next_step(
     // town. The fighter keeps its town-trip drop — it is walking there anyway.
     if cfg.kind == WorkerKind::Fisher {
         if let Some(junk) = junk_list(&s, labels).into_iter().next() {
+            // Named in the log, because the item is gone for good and an
+            // action caption scrolls away. One line per kind, not per unit:
+            // a drop clears the whole stack.
+            info!("[{label}] Worker: dropping {junk} where it stands");
             return vec![Step::Drop(junk)];
         }
     }
