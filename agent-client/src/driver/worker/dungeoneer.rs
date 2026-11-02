@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use onlinerpg_shared::dungeon::{key_drop_floors, relevant_key_depth};
 use onlinerpg_shared::Position;
 
-use super::{bag_load_pct, fighter, junk_list, labels, loot_candidates, Step, WorkerConfig};
+use super::{fighter, junk_list, labels, loot_candidates, Step, WorkerConfig};
 use crate::dungeon::{ChestKind, Dungeon};
 use crate::state::SharedState;
 
@@ -461,13 +461,24 @@ pub(crate) fn step(
         return leg(s, Step::ToGround { x, z }, cfg, run);
     }
 
-    // The bag is the only thing down here that can refuse a pickup — the
-    // server leaves what will not fit on the floor — and a key or the chest's
-    // haul refused is the errand lost. There is no merchant underground, so
-    // the marked junk goes on the floor where we stand.
-    if depth > 0 && bag_load_pct(s) >= cfg.bag_full_pct {
+    // Marked for the floor, not for the trip home. There is no merchant down
+    // here, the weight is paid again on every step of the descent, and the
+    // bag is the only thing underground that can refuse a pickup — the server
+    // leaves what will not fit lying there, and a key or the chest's haul
+    // refused is the errand lost.
+    //
+    // Eagerly, not at the cap: this used to wait for `bag_full_pct`, which
+    // meant carrying the marked load for most of the run and then shedding it
+    // in whatever chamber finally tripped the threshold — quite possibly the
+    // boss room, a turn at a time, mid-fight. One `Drop` clears every unit of
+    // that id (`qty: "all"`), so the cost is one turn per marked kind, paid
+    // once, on the floor we are already standing on.
+    if depth > 0 {
         if let Some(id) = junk_list(s, labels).into_iter().next() {
-            run.say(format!("Bag full underground — dropping {id}."));
+            run.say(format!(
+                "{} floor {depth} — dropping {id}, marked for the floor.",
+                dungeon.name
+            ));
             return vec![Step::Drop(id)];
         }
     }
@@ -477,7 +488,7 @@ pub(crate) fn step(
     if let Some(site) = run.loot_site {
         if run.loot_tries < CHEST_LOOT_TRIES {
             run.loot_tries += 1;
-            if let Some(&id) = loot_candidates(s, site, CHEST_LOOT_RADIUS).first() {
+            if let Some(&id) = loot_candidates(s, labels, site, CHEST_LOOT_RADIUS).first() {
                 run.say(format!(
                     "{} — gathering what the chest threw ({}/{CHEST_LOOT_TRIES}).",
                     dungeon.name, run.loot_tries
